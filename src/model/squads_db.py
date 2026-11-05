@@ -413,8 +413,9 @@ class SquadsSession:
         for idx, p in enumerate(self.players_cache):
             p["cache_index"] = idx
 
-        # 4. Build Teams Cache from lyxL (all 808 authentic clubs with real stadiums)
+        # 4. Build Teams Cache from lyxL (all 808 authentic clubs with real stadiums and managers)
         lyxl = self.db.tables_map.get("lyxL")
+        knen = self.db.tables_map.get("Knen")
         indexed_teams = set()
 
         if lyxl and "IOSv" in lyxl.columns_map:
@@ -426,10 +427,25 @@ class SquadsSession:
                     if tid > 0 and tname and tid not in indexed_teams:
                         roster = self.team_rosters.get(tid, [])
                         stadium_name = stadium_names.get(r_idx) or f"{tname} Stadium"
+                        
+                        # Authentic manager lookup from Knen (1:1 correspondence with lyxL)
+                        mgr_name = ""
+                        mgr_asset_id = 0
+                        if knen and r_idx < len(knen.records):
+                            rec_k = knen.records[r_idx]
+                            common = knen.columns_map["EveZ"].decode_value(rec_k) if "EveZ" in knen.columns_map else ""
+                            first = knen.columns_map["OoQO"].decode_value(rec_k) if "OoQO" in knen.columns_map else ""
+                            last = knen.columns_map["aArc"].decode_value(rec_k) if "aArc" in knen.columns_map else ""
+                            mgr_name = common or f"{first} {last}".strip()
+                            if "tFVQ" in knen.columns_map:
+                                mgr_asset_id = knen.columns_map["tFVQ"].decode_value(rec_k)
+
                         self.teams_cache.append({
                             "teamid": tid,
                             "name": tname,
                             "stadium": stadium_name,
+                            "manager_name": mgr_name,
+                            "manager_asset_id": mgr_asset_id,
                             "roster_count": len(roster),
                             "roster": roster,
                             "table_sname": "lyxL",
@@ -742,6 +758,22 @@ class SquadsSession:
                 return True
         return False
 
+    def update_team_manager(self, team_id: int, new_manager_name: str) -> bool:
+        """Updates manager name for a club in memory and in authentic table Knen."""
+        clean_name = new_manager_name.strip()
+        if not clean_name:
+            return False
+        for t in self.teams_cache:
+            if t["teamid"] == team_id:
+                t["manager_name"] = clean_name
+                r_idx = t.get("row_index")
+                if r_idx is not None:
+                    knen = self.db.tables_map.get("Knen")
+                    if knen and r_idx < len(knen.records):
+                        self.update_table_cell("Knen", r_idx, "EveZ", clean_name)
+                return True
+        return False
+
     def update_table_cell(self, sname: str, row_idx: int, col_sname: str, new_val: Any) -> bool:
         """Directly writes a value into any column of any record in the active database."""
         tbl = self.db.tables_map.get(sname)
@@ -806,7 +838,7 @@ class SquadsSession:
             
         rec = tbl.records[row_idx]
 
-        # 1. Player Attributes & Stats (CZUM)
+        # 1. Player Attributes & Core Stats (CZUM)
         if table_sname == "CZUM":
             if row_idx < len(self.base_players_list):
                 pid = self.base_players_list[row_idx]
@@ -817,23 +849,182 @@ class SquadsSession:
                 ovr = b.get("overallrating") or (p.get("overall") if p else 60)
                 pot = b.get("potential") or (p.get("potential") if p else ovr)
                 pos = get_position_name(p.get("pos_code", -1)) if p else "N/A"
-                return f"Row {row_idx:5d} | [{ovr} OVR / {pot} POT] {pname} ({pos}) — {club} (PID: {pid})"
+                return f"Row {row_idx:5d} | [{ovr} OVR / {pot} POT] {pname} ({pos})  -  {club} (PID: {pid})"
 
-        # 2. Team Formations & Rosters (lyxL)
+        # 2. Clubs, Teams & Roster Properties (lyxL)
         elif table_sname == "lyxL":
             col_tname = tbl.columns_map.get("IOSv")
             tid = int.from_bytes(rec[:2], "little")
             tname = col_tname.decode_value(rec) if col_tname else get_team_name(tid)
-            kisl = self.db.tables_map.get("kISL")
-            stadium = "Default Stadium"
-            if kisl and row_idx < len(kisl.records):
-                col_s = kisl.columns_map.get("fwCQ")
-                if col_s:
-                    stadium = col_s.decode_value(kisl.records[row_idx]).lstrip("_").strip()
-            roster_len = len(self.team_rosters.get(tid, []))
-            return f"Row {row_idx:5d} | [Club] {tname} (ID: {tid}) — Stadium: {stadium} ({roster_len} players)"
+            ovr = tbl.columns_map.get("sqCP").decode_value(rec) if "sqCP" in tbl.columns_map else 0
+            att = tbl.columns_map.get("aDMz").decode_value(rec) if "aDMz" in tbl.columns_map else 0
+            star = tbl.columns_map.get("WLKn").decode_value(rec) if "WLKn" in tbl.columns_map else 0
+            ucl = tbl.columns_map.get("Tsda").decode_value(rec) if "Tsda" in tbl.columns_map else 0
+            star_str = f" | Star PID: #{star}" if star > 0 else ""
+            ucl_str = f" | UCL Wins: {ucl}" if ucl > 0 else ""
+            return f"Row {row_idx:5d} | [Club] {tname} (ID: {tid}) | {ovr} OVR | {att} ATT{star_str}{ucl_str}"
 
-        # 3. Stadium Names & Home Venues (kISL)
+        # 3. Teams & Club Tactical Profiles (mDGw)
+        elif table_sname == "mDGw":
+            tid = int.from_bytes(rec[:2], "little")
+            tname = get_team_name(tid)
+            stars_col = tbl.columns_map.get("pFxE")
+            stars = stars_col.decode_value(rec) if stars_col else 0.0
+            form_col = tbl.columns_map.get("MZIF")
+            form_name = form_col.decode_value(rec) if form_col else ""
+            rival_col = tbl.columns_map.get("oHkj")
+            rival_id = rival_col.decode_value(rec) if rival_col else 0
+            form_str = f" | Formation: {form_name}" if form_name else ""
+            rival_str = f" | Rival: #{rival_id}" if rival_id > 0 else ""
+            return f"Row {row_idx:5d} | [Tactical Profile] {tname} (ID: {tid}) | {stars} Stars{form_str}{rival_str}"
+
+        # 4. Authentic Domestic Leagues & Divisions (onMQ)
+        elif table_sname == "onMQ":
+            col_lname = tbl.columns_map.get("FtgW")
+            col_lid = tbl.columns_map.get("aQrQ")
+            col_tier = tbl.columns_map.get("paPI")
+            col_teams = tbl.columns_map.get("WDGJ")
+            lname = col_lname.decode_value(rec) if col_lname else f"League #{row_idx}"
+            lid = col_lid.decode_value(rec) if col_lid else row_idx
+            tier = col_tier.decode_value(rec) if col_tier else 1
+            num_t = col_teams.decode_value(rec) if col_teams else 0
+            return f"Row {row_idx:5d} | [League] {lname} (ID: {lid}) | Tier {tier} | {num_t} Clubs"
+
+        # 5. Club Budgets & Career Financials (ImNE)
+        elif table_sname == "ImNE":
+            col_cname = tbl.columns_map.get("QmlU")
+            col_b = tbl.columns_map.get("Ibup")
+            col_s = tbl.columns_map.get("MYrf")
+            cname = col_cname.decode_value(rec) if col_cname else f"Club #{row_idx}"
+            budget = col_b.decode_value(rec) if col_b else 0
+            sid = col_s.decode_value(rec) if col_s else 0
+            return f"Row {row_idx:5d} | [Club Finances] {cname} | Budget: EUR {budget:,}K | Stadium: #{sid}"
+
+        # 6. Player Audio Commentary & Callnames (bneD)
+        elif table_sname == "bneD":
+            col_p = tbl.columns_map.get("FuiB")
+            pname = col_p.decode_value(rec) if col_p else f"Name #{row_idx}"
+            return f"Row {row_idx:5d} | [Commentary Call Name] '{pname}'"
+
+        # 7. Custom & Edited Player Identity Names (nQVU)
+        elif table_sname == "nQVU":
+            col_c = tbl.columns_map.get("HdeP")
+            col_s = tbl.columns_map.get("xnfZ")
+            col_f = tbl.columns_map.get("kRfb")
+            col_id = tbl.columns_map.get("ykFq")
+            comm = col_c.decode_value(rec) if col_c else ""
+            sur = col_s.decode_value(rec) if col_s else ""
+            first = col_f.decode_value(rec) if col_f else ""
+            pid = col_id.decode_value(rec) if col_id else 0
+            full_n = comm or f"{first} {sur}".strip() or f"Player #{pid}"
+            return f"Row {row_idx:5d} | [Player Identity] {full_n} (PID: #{pid}) | Kit: {sur}"
+
+        # 8. Player 3D Face & Starhead Assets (nrFl)
+        elif table_sname == "nrFl":
+            col_pid = tbl.columns_map.get("mCXg")
+            col_aid = tbl.columns_map.get("Laxd")
+            col_hq = tbl.columns_map.get("McUr")
+            pid = col_pid.decode_value(rec) if col_pid else 0
+            aid = col_aid.decode_value(rec) if col_aid else 0
+            is_hq = col_hq.decode_value(rec) if col_hq else 0
+            scan_str = "Authentic Starhead Scan" if is_hq else "Generic Custom Head"
+            p = self.players_lookup.get(pid)
+            pname = p.get("name") if p else f"Player #{pid}"
+            return f"Row {row_idx:5d} | [3D Head Asset] {pname} (PID: #{pid}) | Asset ID: #{aid} ({scan_str})"
+
+        # 9. Player Awards, Ballon d'Or & Accolades (UlaA)
+        elif table_sname == "UlaA":
+            col_pid = tbl.columns_map.get("mCXg")
+            col_aw = tbl.columns_map.get("xKVG")
+            col_yr = tbl.columns_map.get("BssH")
+            col_comp = tbl.columns_map.get("HjSL")
+            pid = col_pid.decode_value(rec) if col_pid else 0
+            aw_id = col_aw.decode_value(rec) if col_aw else 0
+            yr = col_yr.decode_value(rec) if col_yr else 0
+            cid = col_comp.decode_value(rec) if col_comp else 0
+            p = self.players_lookup.get(pid)
+            pname = p.get("name") if p else f"Player #{pid}"
+            return f"Row {row_idx:5d} | [Award Winner] {pname} (PID: #{pid}) | Award #{aw_id} | Season {yr} | Comp #{cid}"
+
+        # 10. League-Team Tournament Links (GdtI)
+        elif table_sname == "GdtI":
+            col_tid = tbl.columns_map.get("DPYU")
+            col_lid = tbl.columns_map.get("eCpU")
+            tid = col_tid.decode_value(rec) if col_tid else 0
+            lid = col_lid.decode_value(rec) if col_lid else 0
+            tname = get_team_name(tid)
+            return f"Row {row_idx:5d} | [League Link] {tname} (ID: #{tid}) in League #{lid}"
+
+        # 11. Default Tactical Formations & Lineups (qdZF)
+        elif table_sname == "qdZF":
+            col_tid = tbl.columns_map.get("mCXg")
+            col_fid = tbl.columns_map.get("aQrQ")
+            tid = col_tid.decode_value(rec) if col_tid else 0
+            fid = col_fid.decode_value(rec) if col_fid else 0
+            tname = get_team_name(tid)
+            return f"Row {row_idx:5d} | [Formation Lineup] {tname} (ID: #{tid}) | Formation Preset #{fid}"
+
+        # 12. Team Captains & Set-Piece Roles (YNEf)
+        elif table_sname == "YNEf":
+            col_cap = tbl.columns_map.get("kOha")
+            col_fk = tbl.columns_map.get("dUxb")
+            col_pen = tbl.columns_map.get("Xxmh")
+            cap = col_cap.decode_value(rec) if col_cap else 0
+            fk = col_fk.decode_value(rec) if col_fk else 0
+            pen = col_pen.decode_value(rec) if col_pen else 0
+            cap_p = self.players_lookup.get(cap)
+            cname = cap_p.get("name") if cap_p else f"PID #{cap}"
+            return f"Row {row_idx:5d} | [Set Pieces] Captain: {cname} | Free Kick: PID #{fk} | Penalty: PID #{pen}"
+
+        # 13. Stadium Ultras Banners & Club Flags (WFUF)
+        elif table_sname == "WFUF":
+            col_tid = tbl.columns_map.get("daCW")
+            col_slot = tbl.columns_map.get("lCau")
+            col_tex = tbl.columns_map.get("RdTL")
+            tid = col_tid.decode_value(rec) if col_tid else 0
+            slot = col_slot.decode_value(rec) if col_slot else 0
+            tex = col_tex.decode_value(rec) if col_tex else 0
+            tname = get_team_name(tid)
+            return f"Row {row_idx:5d} | [Ultras Banner] {tname} (ID: #{tid}) | Slot #{slot} | Texture #{tex}"
+
+        # 14. Official Matchday Balls Catalog (nhky)
+        elif table_sname == "nhky":
+            col_bid = tbl.columns_map.get("gDDc")
+            col_def = tbl.columns_map.get("FCfB")
+            bid = col_bid.decode_value(rec) if col_bid else 0
+            is_def = "Default Ball" if (col_def and col_def.decode_value(rec)) else "Custom Model"
+            return f"Row {row_idx:5d} | [Match Ball] Ball Asset ID: #{bid} ({is_def})"
+
+        # 15. Authentic Boots & Footwear Catalog (RMfq)
+        elif table_sname == "RMfq":
+            col_bid = tbl.columns_map.get("AsxF")
+            col_brand = tbl.columns_map.get("yPLv")
+            bid = col_bid.decode_value(rec) if col_bid else 0
+            brand = col_brand.decode_value(rec) if col_brand else 0
+            return f"Row {row_idx:5d} | [Footwear] Boot Model ID: #{bid} | Brand ID: #{brand}"
+
+        # 16. Licensed Match Officials & Referees (xgkO)
+        elif table_sname == "xgkO":
+            col_rid = tbl.columns_map.get("eQzB")
+            col_nat = tbl.columns_map.get("uvPU")
+            col_str = tbl.columns_map.get("cveS")
+            rid = col_rid.decode_value(rec) if col_rid else 0
+            nat = col_nat.decode_value(rec) if col_nat else 0
+            strict = col_str.decode_value(rec) if col_str else 0
+            return f"Row {row_idx:5d} | [Referee] Official ID: #{rid} | Nationality: #{nat} | Strictness: #{strict}"
+
+        # 17. Active Squad Transfers & Roster Links (rIsB)
+        elif table_sname == "rIsB":
+            col_pid = tbl.columns_map.get("wDHM")
+            col_hash = tbl.columns_map.get("ykFq")
+            pid = col_pid.decode_value(rec) if col_pid else 0
+            lhash = col_hash.decode_value(rec) if col_hash else 0
+            p = self.players_lookup.get(pid)
+            pname = p.get("name") if p else f"Player #{pid}"
+            club = p.get("club") if p else "Transfer Link"
+            return f"Row {row_idx:5d} | [Transfer Link] {pname} (PID: #{pid})  -  {club} (Link: #{lhash})"
+
+        # 18. Stadium Names & Home Venues (kISL)
         elif table_sname == "kISL":
             col = tbl.columns_map.get("fwCQ")
             sname = col.decode_value(rec).lstrip("_").strip() if col else "Default Stadium"
@@ -843,47 +1034,187 @@ class SquadsSession:
                 col_t = lyxl.columns_map.get("IOSv")
                 if col_t:
                     tname = col_t.decode_value(lyxl.records[row_idx])
-            return f"Row {row_idx:5d} | [Stadium] {sname} — Home Venue of: {tname} (ID: #{row_idx})"
+            return f"Row {row_idx:5d} | [Stadium] {sname}  -  Home Venue of: {tname} (ID: #{row_idx})"
 
-        # 4. Teams & Club Profiles (mDGw)
-        elif table_sname == "mDGw":
-            tid = int.from_bytes(rec[:2], "little")
-            tname = get_team_name(tid)
-            form_col = tbl.columns_map.get("MZIF")
-            form_name = form_col.decode_value(rec) if form_col else ""
-            if form_name:
-                return f"Row {row_idx:5d} | [Club Profile] {tname} (ID: {tid}) — Formation: {form_name}"
-            return f"Row {row_idx:5d} | [Club Profile] {tname} (ID: {tid})"
+        # 19. Authentic Managers (Knen)
+        elif table_sname == "Knen":
+            col_c = tbl.columns_map.get("EveZ")
+            col_f = tbl.columns_map.get("OoQO")
+            col_l = tbl.columns_map.get("aArc")
+            col_a = tbl.columns_map.get("tFVQ")
+            col_n = tbl.columns_map.get("mIlz")
+            col_t = tbl.columns_map.get("qwYd")
+            comm = col_c.decode_value(rec) if col_c else ""
+            first = col_f.decode_value(rec) if col_f else ""
+            last = col_l.decode_value(rec) if col_l else ""
+            name = comm or f"{first} {last}".strip() or f"Manager #{row_idx}"
+            aid = col_a.decode_value(rec) if col_a else 0
+            nid = col_n.decode_value(rec) if col_n else 0
+            tid = col_t.decode_value(rec) if col_t else 0
+            team_str = f" | Team: {get_team_name(tid)} ({tid})" if tid > 0 else ""
+            return f"Row {row_idx:4d} | [Manager] {name} | Head Asset: #{aid} | Nat: #{nid}{team_str}"
 
-        # 5. Player Biometrics (ONtg)
-        elif table_sname == "ONtg":
-            col_name = tbl.columns_map.get("KAOA")
-            pname = col_name.decode_value(rec) if col_name else f"Model #{row_idx}"
-            return f"Row {row_idx:5d} | [Biometrics] {pname} (Row #{row_idx})"
-
-        # 6. Leagues (ijbM)
-        elif table_sname == "ijbM":
-            lid = tbl.columns[0].decode_value(rec) if tbl.columns else row_idx
-            return f"Row {row_idx:5d} | [League] League ID #{lid}"
-
-        # 7. Nations (hCEv)
-        elif table_sname == "hCEv":
-            col = tbl.columns_map.get("mCXg")
-            nid = col.decode_value(rec) if col else row_idx
-            return f"Row {row_idx:5d} | [Nation] Nation ID #{nid}"
-
-        # 8. Head Coaches & Managers (Vmkr)
+        # 20. Tactical Coaching Staff & Trainers (Vmkr)
         elif table_sname == "Vmkr":
             col = tbl.columns_map.get("fwCQ")
-            mname = col.decode_value(rec) if col else f"Manager #{row_idx}"
-            return f"Row {row_idx:5d} | [Manager] {mname} (Row #{row_idx})"
+            col_sal = tbl.columns_map.get("xpDJ")
+            mname = col.decode_value(rec) if col else f"Coach Staff #{row_idx}"
+            sal = col_sal.decode_value(rec) if col_sal else 0
+            return f"Row {row_idx:5d} | [Coach Staff] {mname} | Salary: EUR {sal:,}"
+
+        # 21. PlayStyles & Gameplay Perks (SPTx)
+        elif table_sname == "SPTx":
+            col_pid = tbl.columns_map.get("pXwC")
+            col_plus = tbl.columns_map.get("JAOM")
+            col_tier = tbl.columns_map.get("KTDQ")
+            col_cat = tbl.columns_map.get("RzAo")
+            pid = col_pid.decode_value(rec) if col_pid else row_idx
+            is_plus = "Gold [Plus]" if (col_plus and col_plus.decode_value(rec)) else "Silver [Standard]"
+            tier = col_tier.decode_value(rec) if col_tier else 1
+            cat = col_cat.decode_value(rec) if col_cat else 0
+            return f"Row {row_idx:3d} | [PlayStyle #{pid}] Tier: {is_plus} (Level {tier}) | Category #{cat}"
+
+        # 22. User Gameplay Preferences & Controls (PViY)
+        elif table_sname == "PViY":
+            col_mode = tbl.columns_map.get("CxKn")
+            col_cam = tbl.columns_map.get("XuPr")
+            col_cfg = tbl.columns_map.get("NuNs")
+            mode = col_mode.decode_value(rec) if col_mode else "DEFAULT"
+            cam = col_cam.decode_value(rec) if col_cam else 0
+            cfg = col_cfg.decode_value(rec) if col_cfg else 0
+            return f"Row {row_idx:4d} | [Gameplay Config] Mode: {mode} | Camera: #{cam} | Controller: #{cfg}"
+
+        # 23. Official Brand & Commercial Sponsors (xuka)
+        elif table_sname == "xuka":
+            col_b = tbl.columns_map.get("roOU")
+            col_c = tbl.columns_map.get("yeEP")
+            col_t = tbl.columns_map.get("CkjP")
+            bname = col_b.decode_value(rec) if col_b else f"Commercial Partner #{row_idx}"
+            cat = col_c.decode_value(rec) if col_c else "Commercial"
+            tier = col_t.decode_value(rec) if col_t else 1
+            return f"Row {row_idx:4d} | [Brand Partner] {bname} ({cat}) | Tier Level: #{tier}"
+
+        # 24. Goal Net Colors & Mesh Types (SizI)
+        elif table_sname == "SizI":
+            col_m = tbl.columns_map.get("jmFE")
+            col_c = tbl.columns_map.get("mlkc")
+            col_s = tbl.columns_map.get("nBFz")
+            mesh = col_m.decode_value(rec) if col_m else 0
+            color = col_c.decode_value(rec) if col_c else 0
+            stripe = col_s.decode_value(rec) if col_s else 0
+            return f"Row {row_idx:4d} | [Goal Net] Mesh Type: #{mesh} | Net RGB: #{color:06X} | Stripe RGB: #{stripe:04X}"
+
+        # 25. Goalpost Nets & Styling Mesh (Qxjv)
+        elif table_sname == "Qxjv":
+            col_d = tbl.columns_map.get("AqxB")
+            col_s = tbl.columns_map.get("LBdc")
+            col_st = tbl.columns_map.get("vvGh")
+            col_t = tbl.columns_map.get("hHvj")
+            depth = col_d.decode_value(rec) if col_d else 0
+            shape = col_s.decode_value(rec) if col_s else 0
+            stanch = col_st.decode_value(rec) if col_st else 0
+            tension = col_t.decode_value(rec) if col_t else 0
+            return f"Row {row_idx:4d} | [Goalpost Net] Depth: #{depth} | Mesh Shape: #{shape} | Stanchion: #{stanch} | Tension: #{tension}"
+
+        # 26. Stadium Geometry & Lighting Presets (sloG)
+        elif table_sname == "sloG":
+            col_sid = tbl.columns_map.get("mCXg")
+            col_light = tbl.columns_map.get("cCBB")
+            col_w = tbl.columns_map.get("SPRd")
+            sid = col_sid.decode_value(rec) if col_sid else row_idx
+            light = col_light.decode_value(rec) if col_light else 0
+            w = col_w.decode_value(rec) if col_w else 0
+            return f"Row {row_idx:3d} | [Stadium Lighting] Venue: #{sid} | Lighting Preset: #{light} | Weather Profile: #{w}"
+
+        # 27. Career Inbox & Notifications (Zeam)
+        elif table_sname == "Zeam":
+            col_typ = tbl.columns_map.get("NKtA")
+            col_urg = tbl.columns_map.get("FyBC")
+            col_pid = tbl.columns_map.get("hzFG")
+            col_tid = tbl.columns_map.get("kGOK")
+            ntype = col_typ.decode_value(rec) if col_typ else 0
+            urg = "High Priority" if (col_urg and col_urg.decode_value(rec)) else "Normal"
+            pid = col_pid.decode_value(rec) if col_pid else 0
+            tid = col_tid.decode_value(rec) if col_tid else 0
+            p_str = f" | Player: PID #{pid}" if pid > 0 else ""
+            t_str = f" | Team: {get_team_name(tid)}" if tid > 0 else ""
+            return f"Row {row_idx:4d} | [Inbox Message] Type: #{ntype} ({urg}){p_str}{t_str}"
+
+        # 28. Transfer Records & Historic Market Moves (eqXx)
+        elif table_sname == "eqXx":
+            col_pid = tbl.columns_map.get("mCXg")
+            col_src = tbl.columns_map.get("sNZW")
+            col_dst = tbl.columns_map.get("ykrW")
+            col_fee = tbl.columns_map.get("lVDX")
+            pid = col_pid.decode_value(rec) if col_pid else 0
+            src = col_src.decode_value(rec) if col_src else 0
+            dst = col_dst.decode_value(rec) if col_dst else 0
+            fee = col_fee.decode_value(rec) if col_fee else 0
+            p = self.players_lookup.get(pid)
+            pname = p.get("name") if p else f"PID #{pid}"
+            return f"Row {row_idx:3d} | [Transfer Record] {pname} : {get_team_name(src)} -> {get_team_name(dst)} | Fee: EUR {fee:,}K"
+
+        # 29. News Feed Articles & Media Press (brHl)
+        elif table_sname == "brHl":
+            col_cat = tbl.columns_map.get("zdlB")
+            col_tid = tbl.columns_map.get("myaC")
+            col_pid = tbl.columns_map.get("qaaE")
+            cat = col_cat.decode_value(rec) if col_cat else 0
+            tid = col_tid.decode_value(rec) if col_tid else 0
+            pid = col_pid.decode_value(rec) if col_pid else 0
+            t_str = f"Club: {get_team_name(tid)}" if tid > 0 else "Worldwide News"
+            p_str = f" | PID #{pid}" if pid > 0 else ""
+            return f"Row {row_idx:4d} | [Press Article] {t_str}{p_str} | Category #{cat}"
+
+        # 30. League Standings & Table Points (yAGl)
+        elif table_sname == "yAGl":
+            col_tid = tbl.columns_map.get("zoID")
+            col_pts = tbl.columns_map.get("JtVK")
+            col_p = tbl.columns_map.get("CgfB")
+            col_w = tbl.columns_map.get("kXOE")
+            col_d = tbl.columns_map.get("TMoF")
+            col_l = tbl.columns_map.get("LGyG")
+            col_gd = tbl.columns_map.get("bLBP")
+            tid = col_tid.decode_value(rec) if col_tid else row_idx
+            pts = col_pts.decode_value(rec) if col_pts else 0
+            p = col_p.decode_value(rec) if col_p else 0
+            w = col_w.decode_value(rec) if col_w else 0
+            d = col_d.decode_value(rec) if col_d else 0
+            l = col_l.decode_value(rec) if col_l else 0
+            gd = col_gd.decode_value(rec) if col_gd else 0
+            return f"Row {row_idx:2d} | [Standing] {get_team_name(tid)} : {pts} Pts | P:{p} W:{w} D:{d} L:{l} (GD: {gd:+d})"
+
+        # 31. Calculated Overall Ratings (kgGh)
+        elif table_sname == "kgGh":
+            col_pos = tbl.columns_map.get("naWP")
+            col_ovr = tbl.columns_map.get("XbPb")
+            col_rep = tbl.columns_map.get("LBdc")
+            pos = col_pos.decode_value(rec) if col_pos else 0
+            ovr = col_ovr.decode_value(rec) if col_ovr else 0
+            rep = col_rep.decode_value(rec) if col_rep else 0
+            pos_name = get_position_name(pos)
+            return f"Row {row_idx:4d} | [OVR Calc] Position: {pos_name} ({pos}) | Calculated Rating: {ovr} OVR | Rep Boost: +{rep}"
+
+        # 32. Player Contracts, Wages & Clauses (AGmV)
+        elif table_sname == "AGmV":
+            col_w = tbl.columns_map.get("EZGA")
+            col_rel = tbl.columns_map.get("MVLC")
+            col_yr = tbl.columns_map.get("VgjC")
+            col_p0 = tbl.columns_map.get("bveC")
+            wage = col_w.decode_value(rec) if col_w else 0
+            rel = col_rel.decode_value(rec) if col_rel else 0
+            yr = col_yr.decode_value(rec) if col_yr else 0
+            pid0 = col_p0.decode_value(rec) if col_p0 else 0
+            p = self.players_lookup.get(pid0)
+            pname = p.get("name") if p else f"PID #{pid0}"
+            rel_str = f" | Release Clause: EUR {rel:,}K" if rel > 0 else ""
+            return f"Row {row_idx:4d} | [Contract] {pname} | Wage: EUR {wage:,}/wk | Until: {yr}{rel_str}"
 
         # Generic fallback for all other tables
         summary_cols = []
         for col in tbl.columns[:4]:
             val = col.decode_value(rec)
-            col_name = get_column_display_name(col.sname)
-            # Check if this value maps to a known team ID
+            col_name = get_column_display_name(col.sname).split(" (")[0]
             if "team" in col_name.lower() and isinstance(val, int) and val in TEAM_NAMES:
                 summary_cols.append(f"{col_name}: {TEAM_NAMES[val]} ({val})")
             else:
@@ -897,7 +1228,20 @@ class SquadsSession:
             p = self.players_lookup.get(pid)
             if p:
                 pos = get_position_name(p.get("pos_code", -1))
-                return f"👤 Player: {p['name']} ({pos}) — {p['club']} (PID: {pid} | {p['overall']} OVR)"
+                return f"Player: {p['name']} ({pos})  -  {p['club']} (PID: {pid} | {p['overall']} OVR)"
+        elif table_sname == "Knen":
+            tbl = self.get_table("Knen")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                comm = tbl.columns_map.get("EveZ").decode_value(rec) if "EveZ" in tbl.columns_map else ""
+                first = tbl.columns_map.get("OoQO").decode_value(rec) if "OoQO" in tbl.columns_map else ""
+                last = tbl.columns_map.get("aArc").decode_value(rec) if "aArc" in tbl.columns_map else ""
+                aid = tbl.columns_map.get("tFVQ").decode_value(rec) if "tFVQ" in tbl.columns_map else 0
+                nid = tbl.columns_map.get("mIlz").decode_value(rec) if "mIlz" in tbl.columns_map else 0
+                tid = tbl.columns_map.get("qwYd").decode_value(rec) if "qwYd" in tbl.columns_map else 0
+                full_m = comm or f"{first} {last}".strip() or f"Manager #{row_idx}"
+                t_str = f"  -  Team: {get_team_name(tid)}" if tid > 0 else ""
+                return f"Manager: {full_m} (Head Asset: #{aid} | Nat: #{nid}){t_str}"
         elif table_sname == "lyxL":
             tbl = self.get_table("lyxL")
             if tbl and row_idx < len(tbl.records):
@@ -905,14 +1249,75 @@ class SquadsSession:
                 tid = int.from_bytes(rec[:2], "little")
                 col_t = tbl.columns_map.get("IOSv")
                 tname = col_t.decode_value(rec) if col_t else get_team_name(tid)
-                kisl = self.get_table("kISL")
-                stadium = "Default Stadium"
-                if kisl and row_idx < len(kisl.records):
-                    col_s = kisl.columns_map.get("fwCQ")
-                    if col_s:
-                        stadium = col_s.decode_value(kisl.records[row_idx]).lstrip("_").strip()
-                roster_len = len(self.team_rosters.get(tid, []))
-                return f"🛡️ Club: {tname} (ID: {tid}) — Venue: {stadium} ({roster_len} players)"
+                ovr = tbl.columns_map.get("sqCP").decode_value(rec) if "sqCP" in tbl.columns_map else 0
+                att = tbl.columns_map.get("aDMz").decode_value(rec) if "aDMz" in tbl.columns_map else 0
+                ucl = tbl.columns_map.get("Tsda").decode_value(rec) if "Tsda" in tbl.columns_map else 0
+                star = tbl.columns_map.get("WLKn").decode_value(rec) if "WLKn" in tbl.columns_map else 0
+                star_p = self.players_lookup.get(star)
+                star_name = star_p.get("name") if star_p else f"PID #{star}"
+                return f"Club: {tname} (ID: #{tid})  -  Rating: {ovr} OVR | {att} ATT  -  Star: {star_name} (UCL: {ucl})"
+        elif table_sname == "mDGw":
+            tbl = self.get_table("mDGw")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                tid = int.from_bytes(rec[:2], "little")
+                tname = get_team_name(tid)
+                stars = tbl.columns_map.get("pFxE").decode_value(rec) if "pFxE" in tbl.columns_map else 0.0
+                form = tbl.columns_map.get("MZIF").decode_value(rec) if "MZIF" in tbl.columns_map else "4-3-3"
+                return f"Club Tactical Profile: {tname} (ID: #{tid})  -  Star Rating: {stars} Stars  -  Preset: {form}"
+        elif table_sname == "onMQ":
+            tbl = self.get_table("onMQ")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                lname = tbl.columns_map.get("FtgW").decode_value(rec) if "FtgW" in tbl.columns_map else "League"
+                lid = tbl.columns_map.get("aQrQ").decode_value(rec) if "aQrQ" in tbl.columns_map else row_idx
+                tier = tbl.columns_map.get("paPI").decode_value(rec) if "paPI" in tbl.columns_map else 1
+                num_t = tbl.columns_map.get("WDGJ").decode_value(rec) if "WDGJ" in tbl.columns_map else 0
+                return f"Domestic League: {lname} (League ID: #{lid})  -  Tier {tier} ({num_t} member clubs)"
+        elif table_sname == "ImNE":
+            tbl = self.get_table("ImNE")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                cname = tbl.columns_map.get("QmlU").decode_value(rec) if "QmlU" in tbl.columns_map else "Club"
+                budget = tbl.columns_map.get("Ibup").decode_value(rec) if "Ibup" in tbl.columns_map else 0
+                sid = tbl.columns_map.get("MYrf").decode_value(rec) if "MYrf" in tbl.columns_map else 0
+                return f"Career Finances: {cname}  -  Starting Transfer Budget: EUR {budget:,}K  -  Home Venue: #{sid}"
+        elif table_sname == "nrFl":
+            tbl = self.get_table("nrFl")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                pid = tbl.columns_map.get("mCXg").decode_value(rec) if "mCXg" in tbl.columns_map else 0
+                aid = tbl.columns_map.get("Laxd").decode_value(rec) if "Laxd" in tbl.columns_map else 0
+                hq = tbl.columns_map.get("McUr").decode_value(rec) if "McUr" in tbl.columns_map else 0
+                p = self.players_lookup.get(pid)
+                pname = p.get("name") if p else f"PID #{pid}"
+                scan = "Authentic Starhead 3D Scan" if hq else "Generic Frostbite Face"
+                return f"Starhead Model: {pname} (PID: #{pid})  -  Head Asset ID: #{aid} ({scan})"
+        elif table_sname == "bneD":
+            tbl = self.get_table("bneD")
+            if tbl and row_idx < len(tbl.records):
+                pname = tbl.columns_map.get("FuiB").decode_value(tbl.records[row_idx]) if "FuiB" in tbl.columns_map else ""
+                return f"Audio Commentary Dictionary: '{pname}'"
+        elif table_sname == "nQVU":
+            tbl = self.get_table("nQVU")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                comm = tbl.columns_map.get("HdeP").decode_value(rec) if "HdeP" in tbl.columns_map else ""
+                sur = tbl.columns_map.get("xnfZ").decode_value(rec) if "xnfZ" in tbl.columns_map else ""
+                first = tbl.columns_map.get("kRfb").decode_value(rec) if "kRfb" in tbl.columns_map else ""
+                pid = tbl.columns_map.get("ykFq").decode_value(rec) if "ykFq" in tbl.columns_map else 0
+                full_n = comm or f"{first} {sur}".strip() or f"PID #{pid}"
+                return f"Player Identity: {full_n} (PID: #{pid})  -  Kit Name: '{sur}'"
+        elif table_sname == "UlaA":
+            tbl = self.get_table("UlaA")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                pid = tbl.columns_map.get("mCXg").decode_value(rec) if "mCXg" in tbl.columns_map else 0
+                aw = tbl.columns_map.get("xKVG").decode_value(rec) if "xKVG" in tbl.columns_map else 0
+                yr = tbl.columns_map.get("BssH").decode_value(rec) if "BssH" in tbl.columns_map else 0
+                p = self.players_lookup.get(pid)
+                pname = p.get("name") if p else f"PID #{pid}"
+                return f"Accolade Winner: {pname} (PID: #{pid})  -  Award #{aw} (Season {yr})"
         elif table_sname == "kISL":
             tbl = self.get_table("kISL")
             if tbl and row_idx < len(tbl.records):
@@ -924,10 +1329,63 @@ class SquadsSession:
                     col_t = lyxl.columns_map.get("IOSv")
                     if col_t:
                         tname = col_t.decode_value(lyxl.records[row_idx])
-                return f"🏟️ Stadium: {sname} — Home Venue of: {tname}"
-        elif table_sname == "mDGw":
-            tbl = self.get_table("mDGw")
+                return f"Stadium: {sname}  -  Home Venue of: {tname}"
+        elif table_sname == "SPTx":
+            tbl = self.get_table("SPTx")
             if tbl and row_idx < len(tbl.records):
-                tid = int.from_bytes(tbl.records[row_idx][:2], "little")
-                return f"🛡️ Club Profile: {get_team_name(tid)} (ID: {tid})"
+                rec = tbl.records[row_idx]
+                pid = tbl.columns_map.get("pXwC").decode_value(rec) if "pXwC" in tbl.columns_map else row_idx
+                is_plus = "Gold [Plus]" if ("JAOM" in tbl.columns_map and tbl.columns_map.get("JAOM").decode_value(rec)) else "Silver [Standard]"
+                return f"PlayStyle Perk #{pid}  -  Tier: {is_plus} (Gameplay Signature Perk)"
+        elif table_sname == "AGmV":
+            tbl = self.get_table("AGmV")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                p0 = tbl.columns_map.get("bveC").decode_value(rec) if "bveC" in tbl.columns_map else 0
+                w = tbl.columns_map.get("EZGA").decode_value(rec) if "EZGA" in tbl.columns_map else 0
+                yr = tbl.columns_map.get("VgjC").decode_value(rec) if "VgjC" in tbl.columns_map else 0
+                p = self.players_lookup.get(p0)
+                pname = p.get("name") if p else f"PID #{p0}"
+                return f"Player Contract: {pname} (PID: #{p0})  -  Weekly Wage: EUR {w:,}  -  Valid Until: {yr}"
+        elif table_sname == "eqXx":
+            tbl = self.get_table("eqXx")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                pid = tbl.columns_map.get("mCXg").decode_value(rec) if "mCXg" in tbl.columns_map else 0
+                src = tbl.columns_map.get("sNZW").decode_value(rec) if "sNZW" in tbl.columns_map else 0
+                dst = tbl.columns_map.get("ykrW").decode_value(rec) if "ykrW" in tbl.columns_map else 0
+                fee = tbl.columns_map.get("lVDX").decode_value(rec) if "lVDX" in tbl.columns_map else 0
+                p = self.players_lookup.get(pid)
+                pname = p.get("name") if p else f"PID #{pid}"
+                return f"Transfer Move: {pname}  -  {get_team_name(src)} to {get_team_name(dst)} (Fee: EUR {fee:,}K)"
+        elif table_sname == "yAGl":
+            tbl = self.get_table("yAGl")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                tid = tbl.columns_map.get("zoID").decode_value(rec) if "zoID" in tbl.columns_map else row_idx
+                pts = tbl.columns_map.get("JtVK").decode_value(rec) if "JtVK" in tbl.columns_map else 0
+                p = tbl.columns_map.get("CgfB").decode_value(rec) if "CgfB" in tbl.columns_map else 0
+                w = tbl.columns_map.get("kXOE").decode_value(rec) if "kXOE" in tbl.columns_map else 0
+                return f"League Table Standings: {get_team_name(tid)}  -  {pts} Points ({w} wins in {p} matches)"
+        elif table_sname == "xuka":
+            tbl = self.get_table("xuka")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                bname = tbl.columns_map.get("roOU").decode_value(rec) if "roOU" in tbl.columns_map else f"Partner #{row_idx}"
+                cat = tbl.columns_map.get("yeEP").decode_value(rec) if "yeEP" in tbl.columns_map else "Commercial"
+                return f"Commercial Brand Partner: {bname} (Category: {cat})  -  Official Sponsor"
+        elif table_sname == "SizI":
+            tbl = self.get_table("SizI")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                mesh = tbl.columns_map.get("jmFE").decode_value(rec) if "jmFE" in tbl.columns_map else 0
+                col = tbl.columns_map.get("mlkc").decode_value(rec) if "mlkc" in tbl.columns_map else 0
+                return f"Goalpost Net Configuration: Mesh Style #{mesh}  -  Hex Primary Color #{col:06X}"
+        elif table_sname == "Zeam":
+            tbl = self.get_table("Zeam")
+            if tbl and row_idx < len(tbl.records):
+                rec = tbl.records[row_idx]
+                ntype = tbl.columns_map.get("NKtA").decode_value(rec) if "NKtA" in tbl.columns_map else 0
+                urg = "Urgent / Action Required" if ("FyBC" in tbl.columns_map and tbl.columns_map.get("FyBC").decode_value(rec)) else "Standard Notification"
+                return f"Career Mode Inbox: Message Type #{ntype} ({urg})"
         return None

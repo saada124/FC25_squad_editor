@@ -16,6 +16,7 @@ try:
     )
     from core.backup import list_folder_backups
     from core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
+    from core.assets import AssetManager
 except ImportError:
     from src.model.squads_db import SquadsSession
     from src.core.schema import (
@@ -26,10 +27,12 @@ except ImportError:
     )
     from src.core.backup import list_folder_backups
     from src.core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
+    from src.core.assets import AssetManager
 
 class SquadEditorApp:
     def __init__(self):
         self.session = SquadsSession()
+        self.assets = AssetManager()
         self.selected_player: Optional[Dict[str, Any]] = None
         self.selected_team: Optional[Dict[str, Any]] = None
         self.selected_table_sname: str = "CZUM"
@@ -60,6 +63,24 @@ class SquadEditorApp:
         ]
         self.filter_pos_category: str = "All"
         self.min_ovr_filter: int = 0
+        self.assets.on_asset_loaded = self._on_async_asset_loaded
+
+    def _on_async_asset_loaded(self, asset_type: str, id_val: int, tag: str):
+        """Asynchronously updates image widgets when CDN downloads complete."""
+        try:
+            if asset_type == "player":
+                if self.selected_player and self.selected_player.get("playerid") == id_val:
+                    if dpg.does_item_exist("player_miniface_img"):
+                        dpg.configure_item("player_miniface_img", texture_tag=tag)
+                if hasattr(self, "selected_team_roster_pid") and self.selected_team_roster_pid == id_val:
+                    if dpg.does_item_exist("roster_player_miniface_img"):
+                        dpg.configure_item("roster_player_miniface_img", texture_tag=tag)
+            elif asset_type == "club":
+                if self.selected_team and self.selected_team.get("teamid") == id_val:
+                    if dpg.does_item_exist("team_crest_img"):
+                        dpg.configure_item("team_crest_img", texture_tag=tag)
+        except Exception:
+            pass
 
     def run(self):
         dpg.create_context()
@@ -70,10 +91,21 @@ class SquadEditorApp:
         
         dpg.setup_dearpygui()
         dpg.show_viewport()
-        dpg.start_dearpygui()
+        while dpg.is_dearpygui_running():
+            self.assets.process_pending_textures()
+            dpg.render_dearpygui_frame()
         dpg.destroy_context()
 
     def _setup_theme(self):
+        font_path = r"C:\Windows\Fonts\segoeui.ttf"
+        if os.path.exists(font_path):
+            try:
+                with dpg.font_registry():
+                    def_font = dpg.add_font(font_path, 16)
+                dpg.bind_font(def_font)
+            except Exception:
+                pass
+
         with dpg.theme() as global_theme:
             with dpg.theme_component(dpg.mvAll):
                 # Dark slate palette matching Live Editor
@@ -103,14 +135,15 @@ class SquadEditorApp:
         dpg.bind_theme(global_theme)
 
     def _build_ui(self):
+        self.assets.init_dpg_textures()
         with dpg.window(tag="primary_window", no_title_bar=True, no_move=True, no_resize=True):
             # Top Control & Status Header
             with dpg.group(horizontal=True):
-                dpg.add_text("⚡ FC 25 SQUAD STUDIO", color=(0, 200, 255))
+                dpg.add_text("FC 25 SQUAD STUDIO", color=(0, 200, 255))
                 dpg.add_text("|", color=(100, 100, 100))
-                dpg.add_button(label="📁 Open Squads", callback=self._on_click_open)
-                dpg.add_button(label="💾 Save Squads", callback=self._on_click_save)
-                dpg.add_button(label="💾 Save As...", callback=self._on_click_save_as)
+                dpg.add_button(label="Open Squads", callback=self._on_click_open)
+                dpg.add_button(label="Save Squads", callback=self._on_click_save)
+                dpg.add_button(label="Save As...", callback=self._on_click_save_as)
                 dpg.add_spacer(width=20)
                 dpg.add_text("Ready. Please open a Squads save file.", tag="status_text", color=(180, 180, 180))
 
@@ -119,23 +152,23 @@ class SquadEditorApp:
             # Main Navigation Tabs
             with dpg.tab_bar(tag="main_tab_bar"):
                 # TAB 1: PLAYERS
-                with dpg.tab(label=" ⚽ Players "):
+                with dpg.tab(label=" Players "):
                     self._build_players_tab()
 
                 # TAB 2: TEAMS
-                with dpg.tab(label=" 🛡️ Teams & Clubs "):
+                with dpg.tab(label=" Teams & Clubs "):
                     self._build_teams_tab()
 
                 # TAB 3: FULL DATABASE EDITOR (ALL 76 TABLES)
-                with dpg.tab(label=" 🗄️ Database Tables (All 76) "):
+                with dpg.tab(label=" Database Tables (All 76) "):
                     self._build_database_tab()
 
                 # TAB 4: SAFETY BACKUPS & INFO
-                with dpg.tab(label=" ⚙️ Settings & Backups "):
+                with dpg.tab(label=" Settings & Backups "):
                     self._build_settings_tab()
 
             # Structural Modification Confirmation Modal
-            with dpg.window(label="⚠️ Structural Table Action Warning", modal=True, show=False, tag="structural_confirm_modal", width=540, height=240, no_resize=True):
+            with dpg.window(label="[!] Structural Table Action Warning", modal=True, show=False, tag="structural_confirm_modal", width=540, height=240, no_resize=True):
                 dpg.add_text("WARNING: Modifying Table Row Count", color=(255, 80, 80))
                 dpg.add_spacer(height=6)
                 dpg.add_text("", tag="structural_modal_msg", wrap=510)
@@ -205,11 +238,17 @@ class SquadEditorApp:
 
             # Right Column: Player Attribute Inspector & Full Editor
             with dpg.child_window():
-                # Color-Coded Header Card
+                # Color-Coded Header Card with Player Miniface
                 with dpg.group(horizontal=True):
-                    dpg.add_text("[ -- ]", tag="player_badge_ovr", color=(0, 255, 120))
-                    dpg.add_text("Select a player from the list to view and edit details.", tag="player_header_name", color=(240, 240, 240))
-                dpg.add_text("No player selected", tag="player_sub_header", color=(160, 160, 160))
+                    with dpg.group():
+                        dpg.add_image("tex_default_player", width=75, height=75, tag="player_miniface_img")
+                        dpg.add_button(label="📷 Face", callback=self._on_import_player_face, width=75)
+                    dpg.add_spacer(width=12)
+                    with dpg.group():
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("[ -- ]", tag="player_badge_ovr", color=(0, 255, 120))
+                            dpg.add_text("Select a player from the list to view and edit details.", tag="player_header_name", color=(240, 240, 240))
+                        dpg.add_text("No player selected", tag="player_sub_header", color=(160, 160, 160))
                 dpg.add_separator()
 
                 with dpg.group(tag="player_edit_controls", show=False):
@@ -554,8 +593,14 @@ class SquadEditorApp:
 
             # Right Column: Team Inspector & Roster
             with dpg.child_window():
-                dpg.add_text("Club Inspector", color=(0, 180, 240))
-                dpg.add_text("Select a team to view information and squad roster.", tag="team_selected_header", color=(200, 200, 200))
+                with dpg.group(horizontal=True):
+                    with dpg.group():
+                        dpg.add_image("tex_default_club", width=70, height=70, tag="team_crest_img")
+                        dpg.add_button(label="📷 Crest", callback=self._on_import_club_crest, width=70)
+                    dpg.add_spacer(width=12)
+                    with dpg.group():
+                        dpg.add_text("Club Inspector", color=(0, 180, 240))
+                        dpg.add_text("Select a team to view information and squad roster.", tag="team_selected_header", color=(200, 200, 200))
                 dpg.add_separator()
 
                 with dpg.group(tag="team_edit_controls", show=False):
@@ -570,6 +615,21 @@ class SquadEditorApp:
                         dpg.add_text("🏟️ Stadium:    ")
                         dpg.add_input_text(tag="edit_team_stadium", width=360)
                         dpg.add_button(label="💾 Save Club Details", callback=self._on_save_team_changes, width=160)
+
+                    # Manager & Head Coach Profile Card
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        with dpg.group():
+                            dpg.add_image("tex_default_manager", width=54, height=54, tag="team_manager_img")
+                            dpg.add_button(label="📷 Face", callback=self._on_import_manager_face, width=54)
+                        dpg.add_spacer(width=10)
+                        with dpg.group():
+                            dpg.add_text("👔 Head Coach / Manager:", color=(0, 220, 160))
+                            with dpg.group(horizontal=True):
+                                dpg.add_input_text(tag="edit_team_manager_name", hint="Manager Name", width=200)
+                                dpg.add_input_text(tag="edit_team_manager_nat", hint="Nationality", width=110)
+                                dpg.add_button(label="💾 Save Manager", callback=self._on_save_manager_changes, width=130)
+                            dpg.add_text("Role: Head Coach", tag="team_manager_role_label", color=(150, 150, 150))
 
                     dpg.add_spacer(height=10)
                     dpg.add_separator()
@@ -586,13 +646,17 @@ class SquadEditorApp:
                     # Selected Player Roster Management Card
                     with dpg.group(tag="team_roster_player_actions", show=False):
                         dpg.add_spacer(height=6)
-                        dpg.add_text("Managing: None", tag="team_roster_player_title", color=(0, 255, 180))
                         with dpg.group(horizontal=True):
-                            dpg.add_text("Jersey #: ")
-                            dpg.add_input_int(tag="edit_team_roster_jersey_num", min_value=1, max_value=99, default_value=10, width=80)
-                            dpg.add_button(label="Set #", callback=self._on_set_roster_jersey_num, width=70)
-                            dpg.add_spacer(width=30)
-                            dpg.add_button(label="❌ Release to Free Agents", callback=self._on_release_roster_player, width=210)
+                            dpg.add_image("tex_default_player", width=50, height=50, tag="roster_player_miniface_img")
+                            dpg.add_spacer(width=8)
+                            with dpg.group():
+                                dpg.add_text("Managing: None", tag="team_roster_player_title", color=(0, 255, 180))
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Jersey #: ")
+                                    dpg.add_input_int(tag="edit_team_roster_jersey_num", min_value=1, max_value=99, default_value=10, width=80)
+                                    dpg.add_button(label="Set #", callback=self._on_set_roster_jersey_num, width=70)
+                                    dpg.add_spacer(width=20)
+                                    dpg.add_button(label="❌ Release to Free Agents", callback=self._on_release_roster_player, width=200)
 
                     dpg.add_spacer(height=10)
                     dpg.add_text("", tag="team_save_feedback", color=(0, 255, 120))
@@ -608,14 +672,14 @@ class SquadEditorApp:
                 dpg.add_combo(items=[], tag="db_table_selector", callback=self._on_change_db_table, width=380)
                 dpg.add_input_text(hint="Quick search...", tag="db_table_filter_input", callback=self._on_filter_db_tables, width=140)
                 dpg.add_spacer(width=8)
-                dpg.add_button(label="➕ Add Row", callback=self._on_click_add_row, width=85)
-                dpg.add_button(label="📋 Clone", callback=self._on_clone_row, width=75)
-                dpg.add_button(label="🗑️ Delete", callback=self._on_click_delete_row, width=80)
+                dpg.add_button(label="+ Add Row", callback=self._on_click_add_row, width=85)
+                dpg.add_button(label="Clone", callback=self._on_clone_row, width=75)
+                dpg.add_button(label="Delete", callback=self._on_click_delete_row, width=80)
 
             dpg.add_spacer(height=4)
             # Table Safety & Stats Card
             with dpg.group(horizontal=True):
-                dpg.add_text("🟢 SAFE", tag="db_table_safety_badge", color=(0, 255, 120))
+                dpg.add_text("[SAFE]", tag="db_table_safety_badge", color=(0, 255, 120))
                 dpg.add_text("|", color=(100, 100, 100))
                 dpg.add_text("Safe to edit player attributes directly.", tag="db_table_safety_desc", color=(200, 230, 255))
             dpg.add_text("Rows: 0 | Columns: 0 | Record Size: 0 bytes", tag="db_table_stats_text", color=(150, 150, 150))
@@ -623,15 +687,15 @@ class SquadEditorApp:
 
             with dpg.group(horizontal=True):
                 # Left Pane: Records Grid & Pagination
-                with dpg.child_window(width=540):
+                with dpg.child_window(width=580):
                     with dpg.group(horizontal=True):
-                        dpg.add_button(label="◀ Prev", callback=self._on_prev_page)
+                        dpg.add_button(label="< Prev", callback=self._on_prev_page)
                         dpg.add_text("Page 1 of 1", tag="db_pagination_text")
-                        dpg.add_button(label="Next ▶", callback=self._on_next_page)
+                        dpg.add_button(label="Next >", callback=self._on_next_page)
                         dpg.add_spacer(width=15)
-                        dpg.add_input_text(hint="Filter rows (name, club, ID)...", callback=self._on_filter_records, tag="db_record_search_input", width=220)
+                        dpg.add_input_text(hint="Filter rows (name, club, ID)...", callback=self._on_filter_records, tag="db_record_search_input", width=240)
 
-                    dpg.add_listbox(items=[], num_items=26, tag="db_records_listbox", callback=self._on_select_record, width=520)
+                    dpg.add_listbox(items=[], num_items=26, tag="db_records_listbox", callback=self._on_select_record, width=560)
 
                 # Right Pane: Detailed Record Column Field Inspector
                 with dpg.child_window():
@@ -646,7 +710,7 @@ class SquadEditorApp:
                         
                     dpg.add_spacer(height=10)
                     with dpg.group(horizontal=True, tag="record_actions_group", show=False):
-                        dpg.add_button(label="💾 Save Record Changes", callback=self._on_save_record_changes, width=220)
+                        dpg.add_button(label="Save Record Changes", callback=self._on_save_record_changes, width=220)
                         dpg.add_text("", tag="record_save_feedback", color=(0, 255, 120))
 
     def _build_settings_tab(self):
@@ -919,6 +983,11 @@ class SquadEditorApp:
         jersey_num = self.session.get_player_jersey_number(pid)
         dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
         dpg.set_value("player_sub_header", f"Club: {p['club']}  |  Kit: #{jersey_num}  |  Position: {p['position']}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}★  |  Weak Foot: {p.get('weak_foot', 3)}★")
+
+        # Update player miniface texture
+        p_tex = self.assets.get_player_texture(pid, p["name"], jersey_num, ovr, p["position"])
+        if dpg.does_item_exist("player_miniface_img"):
+            dpg.configure_item("player_miniface_img", texture_tag=p_tex)
 
         stats = p.get("stats", {})
         
@@ -1223,6 +1292,34 @@ class SquadEditorApp:
         self._on_save_player_changes()
         dpg.set_value("player_save_feedback", "⚡ Prime 99 & All Gold PlayStyles+ Applied!")
 
+    def _on_import_player_face(self):
+        """Allows user to select and import a custom miniface image for the selected player."""
+        if not self.selected_player:
+            dpg.set_value("player_save_feedback", "⚠️ Select a player first to import miniface.")
+            return
+        pid = self.selected_player["playerid"]
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filepath = filedialog.askopenfilename(
+            title=f"Import Miniface for {self.selected_player['name']} (p{pid})",
+            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.dds;*.bmp"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not filepath:
+            return
+        ok, msg = self.assets.import_custom_player_face(pid, filepath)
+        if ok:
+            tex_tag = f"tex_player_{pid}"
+            if dpg.does_item_exist("player_miniface_img"):
+                dpg.configure_item("player_miniface_img", texture_tag=tex_tag)
+            if hasattr(self, "selected_team_roster_pid") and self.selected_team_roster_pid == pid:
+                if dpg.does_item_exist("roster_player_miniface_img"):
+                    dpg.configure_item("roster_player_miniface_img", texture_tag=tex_tag)
+            dpg.set_value("player_save_feedback", f"✓ {msg}")
+        else:
+            dpg.set_value("player_save_feedback", f"❌ {msg}")
+
     # --- Teams UI Callbacks ---
 
     def _load_teams_list(self):
@@ -1278,6 +1375,33 @@ class SquadEditorApp:
         dpg.set_value("edit_team_name", t["name"])
         dpg.set_value("edit_team_stadium", t.get("stadium", "Default Stadium"))
 
+        # Update club crest texture
+        crest_tex = self.assets.get_club_texture(t["teamid"], t["name"])
+        if dpg.does_item_exist("team_crest_img"):
+            dpg.configure_item("team_crest_img", texture_tag=crest_tex)
+
+        # Update manager details & texture from authentic database or assets
+        mgr_name = t.get("manager_name") or ""
+        mgr_asset_id = t.get("manager_asset_id", 0)
+        mgr_info = self.assets.get_club_manager_info(t["teamid"], t["name"])
+        if not mgr_name:
+            mgr_name = mgr_info.get("name", "Head Coach")
+        mgr_nat = mgr_info.get("nationality", "International")
+
+        if dpg.does_item_exist("edit_team_manager_name"):
+            dpg.set_value("edit_team_manager_name", mgr_name)
+        if dpg.does_item_exist("edit_team_manager_nat"):
+            dpg.set_value("edit_team_manager_nat", mgr_nat)
+        if dpg.does_item_exist("team_manager_role_label"):
+            role_txt = f"Role: {mgr_info.get('role', 'Head Coach')}"
+            if mgr_asset_id > 0:
+                role_txt += f"  |  Asset ID: {mgr_asset_id}"
+            dpg.set_value("team_manager_role_label", role_txt)
+
+        mgr_tex = self.assets.get_manager_texture(t["teamid"], mgr_name, mgr_asset_id)
+        if dpg.does_item_exist("team_manager_img"):
+            dpg.configure_item("team_manager_img", texture_tag=mgr_tex)
+
         self._refresh_team_roster_display()
         self.selected_team_roster_pid = None
         if dpg.does_item_exist("team_roster_player_actions"):
@@ -1301,6 +1425,12 @@ class SquadEditorApp:
         
         dpg.set_value("team_roster_player_title", f"Managing: #{jersey} {pname} ({pos} | {ovr} OVR | PID: {pid})")
         dpg.set_value("edit_team_roster_jersey_num", jersey)
+
+        # Update roster player miniface
+        roster_tex = self.assets.get_player_texture(pid, pname, jersey, ovr if isinstance(ovr, int) else 75, pos)
+        if dpg.does_item_exist("roster_player_miniface_img"):
+            dpg.configure_item("roster_player_miniface_img", texture_tag=roster_tex)
+
         dpg.configure_item("team_roster_player_actions", show=True)
 
     def _on_set_roster_jersey_num(self):
@@ -1450,6 +1580,72 @@ class SquadEditorApp:
         self.session.update_team_stadium(self.selected_team["teamid"], new_stadium)
         dpg.set_value("team_save_feedback", "✓ Club details & stadium updated!")
         self._on_filter_teams()
+
+    def _on_import_club_crest(self):
+        """Allows user to select and import a custom club crest image."""
+        if not self.selected_team:
+            dpg.set_value("team_save_feedback", "⚠️ Select a club first to import crest.")
+            return
+        tid = self.selected_team["teamid"]
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filepath = filedialog.askopenfilename(
+            title=f"Import Crest for {self.selected_team['name']} (ID {tid})",
+            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.dds;*.bmp"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not filepath:
+            return
+        ok, msg = self.assets.import_custom_club_crest(tid, filepath)
+        if ok:
+            tex_tag = f"tex_club_{tid}"
+            if dpg.does_item_exist("team_crest_img"):
+                dpg.configure_item("team_crest_img", texture_tag=tex_tag)
+            dpg.set_value("team_save_feedback", f"✓ {msg}")
+        else:
+            dpg.set_value("team_save_feedback", f"❌ {msg}")
+
+    def _on_import_manager_face(self):
+        """Allows user to select and import a custom manager photo."""
+        if not self.selected_team:
+            dpg.set_value("team_save_feedback", "⚠️ Select a club first to import manager photo.")
+            return
+        tid = self.selected_team["teamid"]
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filepath = filedialog.askopenfilename(
+            title=f"Import Manager Photo for {self.selected_team['name']}",
+            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.dds;*.bmp"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not filepath:
+            return
+        ok, msg = self.assets.import_custom_manager_face(tid, filepath)
+        if ok:
+            tex_tag = f"tex_manager_{tid}"
+            if dpg.does_item_exist("team_manager_img"):
+                dpg.configure_item("team_manager_img", texture_tag=tex_tag)
+            dpg.set_value("team_save_feedback", f"✓ {msg}")
+        else:
+            dpg.set_value("team_save_feedback", f"❌ {msg}")
+
+    def _on_save_manager_changes(self):
+        """Saves custom manager name and nationality into database and assets."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        m_name = (dpg.get_value("edit_team_manager_name") or "Head Coach").strip()
+        m_nat = (dpg.get_value("edit_team_manager_nat") or "International").strip()
+        # Persist to database table Knen
+        self.session.update_team_manager(tid, m_name)
+        self.selected_team["manager_name"] = m_name
+        self.assets.set_club_manager_info(tid, m_name, m_nat, "Head Coach")
+        mgr_tex = self.assets.get_manager_texture(tid, m_name)
+        if dpg.does_item_exist("team_manager_img"):
+            dpg.configure_item("team_manager_img", texture_tag=mgr_tex)
+        dpg.set_value("team_save_feedback", f"✓ Manager details saved in database: {m_name} ({m_nat})")
 
     # --- Database Editor UI Callbacks ---
 
@@ -1661,9 +1857,9 @@ class SquadEditorApp:
         dpg.set_value("record_inspector_header", f"Editing Table '{tbl.sname}' ({get_table_display_name(tbl.sname)}) Row #{row_idx}")
         
         if safety["level"] == "DANGEROUS":
-            dpg.set_value("record_inspector_safety_warning", f"⚠️ HIGH RISK TABLE: {safety['desc']}")
+            dpg.set_value("record_inspector_safety_warning", f"[HIGH RISK TABLE]: {safety['desc']}")
         elif safety["level"] == "CAUTION":
-            dpg.set_value("record_inspector_safety_warning", f"🟡 CAUTION: {safety['desc']}")
+            dpg.set_value("record_inspector_safety_warning", f"[CAUTION]: {safety['desc']}")
         else:
             dpg.set_value("record_inspector_safety_warning", "")
 
@@ -1680,21 +1876,27 @@ class SquadEditorApp:
                     with dpg.group(horizontal=True):
                         # Label with bit width and max range
                         if col.col_type == 3:
-                            max_val = (1 << col.bit_size) - 1
-                            lbl = f"{disp_name} [{col.sname}] ({col.bit_size}b | 0-{max_val:,}):"
+                            if col.bit_size > 64:
+                                lbl = f"{disp_name} [{col.sname}] ({col.bit_size}b bitmask):"
+                            else:
+                                max_val = (1 << col.bit_size) - 1
+                                lbl = f"{disp_name} [{col.sname}] ({col.bit_size}b | 0-{max_val:,}):"
                         else:
                             lbl = f"{disp_name} [{col.sname}]:"
                             
-                        dpg.add_text(lbl, color=(180, 220, 255), width=280)
+                        with dpg.group(width=340):
+                            dpg.add_text(lbl, color=(180, 220, 255))
                         tag = f"field_edit_{col.sname}"
                         
                         if col.col_type == 0:  # String
-                            dpg.add_input_text(default_value=str(val), tag=tag, width=300)
+                            dpg.add_input_text(default_value=str(val), tag=tag, width=320)
                         elif col.col_type == 4:  # Float
                             dpg.add_input_float(default_value=float(val), tag=tag, width=200)
                         elif col.bit_size == 1:  # Boolean
                             dpg.add_combo(items=["0 - Disabled", "1 - Enabled"], default_value="1 - Enabled" if val else "0 - Disabled", tag=tag, width=200)
-                        else:  # Integer / Bitfield
+                        elif col.bit_size > 31 or (isinstance(val, int) and (val > 2147483647 or val < -2147483648)):  # Large bitfield / arbitrary precision int
+                            dpg.add_input_text(default_value=str(val), tag=tag, width=320)
+                        else:  # Standard 32-bit integer
                             dpg.add_input_int(default_value=int(val), tag=tag, width=200)
                     
                     # If this column has a safety warning, show it directly underneath
@@ -1719,13 +1921,18 @@ class SquadEditorApp:
                 raw_val = dpg.get_value(tag)
                 if col.bit_size == 1 and isinstance(raw_val, str):
                     val = 1 if "1" in raw_val else 0
+                elif col.col_type == 3 and isinstance(raw_val, str):
+                    try:
+                        val = int(raw_val.strip())
+                    except ValueError:
+                        val = 0
                 else:
                     val = raw_val
                     
                 is_valid, err_msg = validate_column_value(col.col_type, col.bit_size, val)
                 if not is_valid:
                     disp_name = get_column_display_name(col.sname)
-                    dpg.set_value("record_save_feedback", f"❌ ERROR in '{disp_name}' [{col.sname}]: {err_msg}")
+                    dpg.set_value("record_save_feedback", f"ERROR in '{disp_name}' [{col.sname}]: {err_msg}")
                     dpg.configure_item("record_save_feedback", color=(255, 80, 80))
                     return
                 parsed_values[col.sname] = val
@@ -1735,7 +1942,7 @@ class SquadEditorApp:
             self.session.update_table_cell(self.selected_table_sname, row_idx, sname, val)
 
         dpg.configure_item("record_save_feedback", color=(0, 255, 120))
-        dpg.set_value("record_save_feedback", f"✓ Record #{row_idx} saved and verified successfully!")
+        dpg.set_value("record_save_feedback", f"[OK] Record #{row_idx} saved and verified successfully!")
         self._render_db_records_page()
 
 def main():

@@ -48,6 +48,7 @@ scratch/
 test_*.py
 scratch_*.py
 *_strings.txt
+assets/
 
 # ==============================================================================
 # IDEs & Operating System Artifacts

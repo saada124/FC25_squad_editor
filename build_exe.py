@@ -13,6 +13,7 @@ def build():
         pyinstaller_exe = "pyinstaller"
 
     presets_src = os.path.join(base_dir, "player_presets")
+    assets_src = os.path.join(base_dir, "assets")
     cmd = [
         pyinstaller_exe,
         "--name=FC25_Squad_Editor",
@@ -20,6 +21,11 @@ def build():
         "--windowed",
         f"--paths={src_dir}",
         f"--add-data={presets_src};player_presets",
+        f"--add-data={assets_src};assets",
+        "--hidden-import=PIL",
+        "--hidden-import=PIL.Image",
+        "--hidden-import=PIL.ImageDraw",
+        "--hidden-import=PIL.ImageFont",
         "--clean",
         main_script
     ]
