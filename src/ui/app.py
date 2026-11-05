@@ -9,10 +9,10 @@ import dearpygui.dearpygui as dpg
 try:
     from model.squads_db import SquadsSession
     from core.schema import (
-        get_table_display_name, get_column_display_name, get_position_name, get_team_name,
-        POSITION_NAMES, TEAM_NAMES, CATEGORY_LIST, TABLE_CATEGORIES, TABLE_SAFETY_CONFIG,
+        get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name,
+        POSITION_NAMES, TEAM_NAMES, NATION_NAMES, CATEGORY_LIST, TABLE_CATEGORIES, TABLE_SAFETY_CONFIG,
         get_table_category, get_table_safety_info, is_column_id_or_key, get_column_safety_warning,
-        validate_column_value
+        validate_column_value, classify_column
     )
     from core.backup import list_folder_backups
     from core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
@@ -20,10 +20,10 @@ try:
 except ImportError:
     from src.model.squads_db import SquadsSession
     from src.core.schema import (
-        get_table_display_name, get_column_display_name, get_position_name, get_team_name,
-        POSITION_NAMES, TEAM_NAMES, CATEGORY_LIST, TABLE_CATEGORIES, TABLE_SAFETY_CONFIG,
+        get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name,
+        POSITION_NAMES, TEAM_NAMES, NATION_NAMES, CATEGORY_LIST, TABLE_CATEGORIES, TABLE_SAFETY_CONFIG,
         get_table_category, get_table_safety_info, is_column_id_or_key, get_column_safety_warning,
-        validate_column_value
+        validate_column_value, classify_column
     )
     from src.core.backup import list_folder_backups
     from src.core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
@@ -41,6 +41,8 @@ class SquadEditorApp:
         self.current_table_page: int = 0
         self.page_size: int = 50
         self.selected_record_index: Optional[int] = None
+        self.inspector_filter_query: str = ""
+        self.inspector_show_tech_tags: bool = False
         self.selected_team_roster_pid: Optional[int] = None
         self.filtered_sign_players: List[Dict[str, Any]] = []
         self.selected_sign_player: Optional[Dict[str, Any]] = None
@@ -697,15 +699,20 @@ class SquadEditorApp:
 
                     dpg.add_listbox(items=[], num_items=26, tag="db_records_listbox", callback=self._on_select_record, width=560)
 
-                # Right Pane: Detailed Record Column Field Inspector
+                # Right Pane: Modernized Record Column Field Inspector
                 with dpg.child_window():
-                    dpg.add_text("Record Column Inspector (All Fields)", color=(0, 180, 240))
+                    dpg.add_text("Record Column Inspector", color=(0, 180, 240))
                     dpg.add_text("", tag="record_inspector_entity_banner", color=(0, 255, 200))
                     dpg.add_text("Select a row from the left to view and edit column values.", tag="record_inspector_header", color=(220, 220, 220))
                     dpg.add_text("", tag="record_inspector_safety_warning", color=(255, 180, 0))
                     dpg.add_separator()
                     
-                    with dpg.child_window(height=500, tag="record_fields_container"):
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(hint="Filter columns (e.g. name, rating, id)...", callback=self._on_filter_inspector_columns, tag="inspector_column_filter", width=330)
+                        dpg.add_checkbox(label="Show Tech IDs/Bits", default_value=False, tag="inspector_show_tech_tags", callback=self._on_toggle_tech_tags)
+                    dpg.add_spacer(height=3)
+
+                    with dpg.child_window(height=480, tag="record_fields_container"):
                         pass
                         
                     dpg.add_spacer(height=10)
@@ -1847,6 +1854,24 @@ class SquadEditorApp:
             return
 
         self.selected_record_index = row_idx
+        self._inspect_record(tbl, row_idx)
+
+    def _on_filter_inspector_columns(self, sender, app_data):
+        self.inspector_filter_query = (app_data or "").strip().lower()
+        if self.selected_record_index is not None and self.selected_table_sname:
+            tbl = self.session.get_table(self.selected_table_sname)
+            if tbl:
+                self._inspect_record(tbl, self.selected_record_index)
+
+    def _on_toggle_tech_tags(self, sender, app_data):
+        self.inspector_show_tech_tags = bool(app_data)
+        if self.selected_record_index is not None and self.selected_table_sname:
+            tbl = self.session.get_table(self.selected_table_sname)
+            if tbl:
+                self._inspect_record(tbl, self.selected_record_index)
+
+    def _inspect_record(self, tbl, row_idx):
+        self.selected_record_index = row_idx
         entity_hdr = self.session.get_row_entity_header(tbl.sname, row_idx)
         if entity_hdr:
             dpg.set_value("record_inspector_entity_banner", entity_hdr)
@@ -1866,43 +1891,121 @@ class SquadEditorApp:
         rec = tbl.records[row_idx]
         dpg.delete_item("record_fields_container", children_only=True)
 
+        keys_cols = []
+        core_cols = []
+        flag_cols = []
+        adv_cols = []
+
+        query = getattr(self, "inspector_filter_query", "")
+        show_tech = getattr(self, "inspector_show_tech_tags", False)
+
+        for col in tbl.columns:
+            val = col.decode_value(rec)
+            clean_name = get_column_clean_name(col.sname, tbl.sname)
+            raw_disp = get_column_display_name(col.sname, tbl.sname)
+            info = classify_column(tbl.sname, col.sname, col.col_type, col.bit_size, clean_name)
+            
+            # Filter match check
+            if query:
+                match_text = f"{clean_name} {raw_disp} {col.sname} {val}".lower()
+                if query not in match_text:
+                    continue
+
+            item = (col, val, clean_name, info)
+            sec = info["section"]
+            if sec == "KEYS":
+                keys_cols.append(item)
+            elif sec == "FLAGS":
+                flag_cols.append(item)
+            elif sec == "ADVANCED":
+                adv_cols.append(item)
+            else:
+                core_cols.append(item)
+
         with dpg.group(parent="record_fields_container"):
-            for col in tbl.columns:
-                val = col.decode_value(rec)
-                disp_name = get_column_display_name(col.sname)
-                warn = get_column_safety_warning(tbl.sname, col.sname, col.col_type, col.bit_size)
-                
+            def render_field_entry(col, val, clean_name, info):
                 with dpg.group():
                     with dpg.group(horizontal=True):
-                        # Label with bit width and max range
-                        if col.col_type == 3:
-                            if col.bit_size > 64:
-                                lbl = f"{disp_name} [{col.sname}] ({col.bit_size}b bitmask):"
-                            else:
-                                max_val = (1 << col.bit_size) - 1
-                                lbl = f"{disp_name} [{col.sname}] ({col.bit_size}b | 0-{max_val:,}):"
+                        # Clean label formatting
+                        if show_tech:
+                            lbl = f"{clean_name} [{col.sname} • {col.bit_size}b]:"
                         else:
-                            lbl = f"{disp_name} [{col.sname}]:"
+                            lbl = f"{clean_name}:"
                             
-                        with dpg.group(width=340):
-                            dpg.add_text(lbl, color=(180, 220, 255))
+                        with dpg.group(width=300):
+                            dpg.add_text(lbl, color=(190, 225, 255))
+                            
+                        # Role badge
+                        dpg.add_text(info["badge"], color=info["badge_color"])
+                        dpg.add_spacer(width=4)
+                        
                         tag = f"field_edit_{col.sname}"
                         
+                        # Foreign Key / Entity resolver check
+                        entity_ref = ""
+                        if info.get("target_entity"):
+                            entity_ref = self.session.resolve_entity_reference(info["target_entity"], val)
+                            
+                        # Controls
                         if col.col_type == 0:  # String
                             dpg.add_input_text(default_value=str(val), tag=tag, width=320)
                         elif col.col_type == 4:  # Float
-                            dpg.add_input_float(default_value=float(val), tag=tag, width=200)
+                            dpg.add_input_float(default_value=float(val), tag=tag, width=180)
                         elif col.bit_size == 1:  # Boolean
-                            dpg.add_combo(items=["0 - Disabled", "1 - Enabled"], default_value="1 - Enabled" if val else "0 - Disabled", tag=tag, width=200)
-                        elif col.bit_size > 31 or (isinstance(val, int) and (val > 2147483647 or val < -2147483648)):  # Large bitfield / arbitrary precision int
+                            items = ["0 - Disabled", "1 - Enabled"]
+                            if tbl.sname == "kISL" and col.sname == "GdYI":
+                                items = ["0 - Official Venue Name", "1 - Custom Stadium Override"]
+                            elif tbl.sname == "kISL" and col.sname == "WMtm":
+                                items = ["0 - Standard Venue Capacity", "1 - Major Stadium Tier"]
+                            elif "name" in clean_name.lower() or "custom" in clean_name.lower():
+                                items = ["0 - Official / Default", "1 - Custom Name Active"]
+                            default_item = items[1] if val else items[0]
+                            dpg.add_combo(items=items, default_value=default_item, tag=tag, width=230)
+                        elif col.bit_size > 32 or (isinstance(val, int) and (val > 2147483647 or val < -2147483648)):
                             dpg.add_input_text(default_value=str(val), tag=tag, width=320)
-                        else:  # Standard 32-bit integer
-                            dpg.add_input_int(default_value=int(val), tag=tag, width=200)
-                    
-                    # If this column has a safety warning, show it directly underneath
-                    if warn:
-                        dpg.add_text(f"   {warn}", color=(255, 180, 50))
+                        else:  # Standard integer
+                            dpg.add_input_int(default_value=int(val), tag=tag, width=180)
+                            
+                        if entity_ref:
+                            dpg.add_spacer(width=4)
+                            dpg.add_text(f"-> {entity_ref}", color=(0, 255, 180))
+                            
+                    # Warning (only when real primary key or raw large blob)
+                    if info.get("warning"):
+                        dpg.add_text(f"   {info['warning']}", color=(255, 90, 90))
                     dpg.add_spacer(height=3)
+
+            # 1. Render Keys & Relational Links
+            if keys_cols:
+                dpg.add_text(f"=== 🔑 Identification & Relational Links ({len(keys_cols)}) ===", color=(255, 200, 60))
+                dpg.add_separator()
+                for c, v, cn, inf in keys_cols:
+                    render_field_entry(c, v, cn, inf)
+                dpg.add_spacer(height=8)
+
+            # 2. Render Core Properties & Ratings
+            if core_cols:
+                dpg.add_text(f"=== 📝 Core Properties & Attributes ({len(core_cols)}) ===", color=(0, 210, 255))
+                dpg.add_separator()
+                for c, v, cn, inf in core_cols:
+                    render_field_entry(c, v, cn, inf)
+                dpg.add_spacer(height=8)
+
+            # 3. Render Flags & State Toggles
+            if flag_cols:
+                dpg.add_text(f"=== ⚙️ Flags & State Toggles ({len(flag_cols)}) ===", color=(0, 255, 180))
+                dpg.add_separator()
+                for c, v, cn, inf in flag_cols:
+                    render_field_entry(c, v, cn, inf)
+                dpg.add_spacer(height=8)
+
+            # 4. Render Advanced & Internal Engine Variables (Collapsed by default!)
+            if adv_cols:
+                with dpg.collapsing_header(label=f"🔬 Advanced & Internal Engine Fields ({len(adv_cols)} fields)", default_open=False):
+                    dpg.add_text("Internal bitmasks, raw engine hashes, and undocumented variables.", color=(150, 150, 160))
+                    dpg.add_separator()
+                    for c, v, cn, inf in adv_cols:
+                        render_field_entry(c, v, cn, inf)
 
         dpg.configure_item("record_actions_group", show=True)
         dpg.set_value("record_save_feedback", "")
@@ -1920,7 +2023,7 @@ class SquadEditorApp:
             if dpg.does_item_exist(tag):
                 raw_val = dpg.get_value(tag)
                 if col.bit_size == 1 and isinstance(raw_val, str):
-                    val = 1 if "1" in raw_val else 0
+                    val = 1 if ("1" in raw_val or "Custom" in raw_val or "Enabled" in raw_val or "Yes" in raw_val) else 0
                 elif col.col_type == 3 and isinstance(raw_val, str):
                     try:
                         val = int(raw_val.strip())
@@ -1931,7 +2034,7 @@ class SquadEditorApp:
                     
                 is_valid, err_msg = validate_column_value(col.col_type, col.bit_size, val)
                 if not is_valid:
-                    disp_name = get_column_display_name(col.sname)
+                    disp_name = get_column_clean_name(col.sname, tbl.sname)
                     dpg.set_value("record_save_feedback", f"ERROR in '{disp_name}' [{col.sname}]: {err_msg}")
                     dpg.configure_item("record_save_feedback", color=(255, 80, 80))
                     return

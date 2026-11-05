@@ -7,12 +7,14 @@ try:
     from core.backup import create_load_backup, list_folder_backups
     from core.fbchunks import FBChunksContainer
     from core.db_codec import FIFADatabase, DBTable, DBColumn, get_bits, set_bits
-    from core.schema import get_table_display_name, get_column_display_name, get_position_name, get_team_name, TEAM_NAMES, POSITION_NAMES
+    from core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
+    from core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
 except ImportError:
     from src.core.backup import create_load_backup, list_folder_backups
     from src.core.fbchunks import FBChunksContainer
     from src.core.db_codec import FIFADatabase, DBTable, DBColumn, get_bits, set_bits
-    from src.core.schema import get_table_display_name, get_column_display_name, get_position_name, get_team_name, TEAM_NAMES, POSITION_NAMES
+    from src.core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
+    from src.core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
 
 def get_base_dir() -> str:
     """Returns application directory whether running as script or frozen PyInstaller exe."""
@@ -176,6 +178,12 @@ class SquadsSession:
                         p = self.players_lookup[pid]
                         tid = cdata.get("teamid", 0)
                         cname = cdata.get("club", "Free Agent")
+                        # Failsafe routing: if male player is assigned to a secondary/women TID, remap to primary men TID
+                        is_female = (p.get("stats", {}).get("gender") == "1" or p.get("gender") == 1 or "women" in cname.lower() or "wsl" in str(cdata.get("league", "")).lower() or "liga f" in str(cdata.get("league", "")).lower())
+                        if not is_female and tid in SECONDARY_TO_PRIMARY_TEAMS:
+                            tid = SECONDARY_TO_PRIMARY_TEAMS[tid]
+                            cname = cname.replace(" (Women)", "").strip()
+
                         if tid > 0 or cname != "Free Agent":
                             p["teamid"] = tid
                             p["club"] = cname
@@ -225,11 +233,11 @@ class SquadsSession:
             lyxl = self.db.tables_map.get("lyxL")
             if lyxl and "IOSv" in lyxl.columns_map:
                 col_tname = lyxl.columns_map["IOSv"]
-                for rec in lyxl.records:
+                for r_idx, rec in enumerate(lyxl.records):
                     tid = int.from_bytes(rec[:2], "little")
                     tname = col_tname.decode_value(rec)
                     if tid > 0 and tname:
-                        TEAM_NAMES[tid] = tname
+                        TEAM_NAMES[tid] = format_team_display_name(tid, tname, r_idx)
 
             # 4. Index high-level entities
             self._build_indexes()
@@ -425,8 +433,9 @@ class SquadsSession:
                     tid = int.from_bytes(rec[:2], "little")
                     tname = col_tname.decode_value(rec)
                     if tid > 0 and tname and tid not in indexed_teams:
+                        formatted_name = format_team_display_name(tid, tname, r_idx)
                         roster = self.team_rosters.get(tid, [])
-                        stadium_name = stadium_names.get(r_idx) or f"{tname} Stadium"
+                        stadium_name = stadium_names.get(r_idx) or f"{formatted_name} Stadium"
                         
                         # Authentic manager lookup from Knen (1:1 correspondence with lyxL)
                         mgr_name = ""
@@ -440,9 +449,12 @@ class SquadsSession:
                             if "tFVQ" in knen.columns_map:
                                 mgr_asset_id = knen.columns_map["tFVQ"].decode_value(rec_k)
 
+                        if not mgr_name and is_women_team(tid, r_idx):
+                            mgr_name = "Head Coach"
+
                         self.teams_cache.append({
                             "teamid": tid,
-                            "name": tname,
+                            "name": formatted_name,
                             "stadium": stadium_name,
                             "manager_name": mgr_name,
                             "manager_asset_id": mgr_asset_id,
@@ -1220,6 +1232,55 @@ class SquadsSession:
             else:
                 summary_cols.append(f"{col_name}: {val}")
         return f"Row {row_idx:5d} | " + " | ".join(summary_cols)
+
+    def resolve_team_name(self, team_id: int) -> str:
+        """Resolves team ID to team name."""
+        if team_id is None or team_id < 0:
+            return ""
+        return get_team_name(team_id)
+
+    def resolve_player_name(self, player_id: int) -> str:
+        """Resolves player ID to player name and position."""
+        if not player_id or player_id <= 0:
+            return ""
+        p = self.players_lookup.get(player_id)
+        if p:
+            pos = get_position_name(p.get("pos_code", -1))
+            return f"{p['name']} ({pos}, {p.get('club', '')})"
+        return f"PID #{player_id}"
+
+    def resolve_nation_name(self, nation_id: int) -> str:
+        """Resolves FIFA nation ID to country name."""
+        if not nation_id or nation_id <= 0:
+            return ""
+        return get_nation_name(nation_id)
+
+    def resolve_stadium_name(self, stadium_id: int) -> str:
+        """Resolves stadium ID to venue name."""
+        kisl = self.get_table("kISL")
+        if kisl and 0 <= stadium_id < len(kisl.records):
+            col_s = kisl.columns_map.get("fwCQ")
+            if col_s:
+                sname = col_s.decode_value(kisl.records[stadium_id]).lstrip("_").strip()
+                if sname:
+                    return sname
+        return f"Stadium #{stadium_id}"
+
+    def resolve_entity_reference(self, target_entity: str, val: Any) -> str:
+        """Resolves an entity value based on target entity type."""
+        try:
+            ival = int(val)
+        except (ValueError, TypeError):
+            return ""
+        if target_entity == "team":
+            return self.resolve_team_name(ival)
+        elif target_entity == "player":
+            return self.resolve_player_name(ival)
+        elif target_entity == "nation":
+            return self.resolve_nation_name(ival)
+        elif target_entity == "stadium":
+            return self.resolve_stadium_name(ival)
+        return ""
 
     def get_row_entity_header(self, table_sname: str, row_idx: int) -> Optional[str]:
         """Returns entity context header for the Record Inspector."""

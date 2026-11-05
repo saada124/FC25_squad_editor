@@ -247,23 +247,249 @@ def get_table_safety_info(sname: str) -> dict:
         "desc": f"Relational table '{get_table_display_name(sname)}'. Modifying row values requires valid foreign key references."
     }
 
+# Precision table primary key mappings
+TABLE_PRIMARY_KEYS = {
+    "CZUM": {"wDHM", "GFLI", "eyGK"},
+    "RrqT": {"ykFq"},
+    "ONtg": {"wDHM"},
+    "lyxL": {"teamid"},
+    "mDGw": {"teamid"},
+    "onMQ": {"aQrQ"},
+    "hCEv": {"nationid"},
+    "Knen": {"managerid"},
+    "kISL": {"DmlS"},
+    "SPTx": {"pXwC"},
+    "AGmV": {"bveC"},
+    "nrFl": {"mCXg"},
+    "nhXl": {"mCXg", "ykFq"},
+    "UlaA": {"mCXg"},
+    "bneD": {"vIys"},
+    "nQVU": {"ykFq"},
+    "dMwM": {"cardid"},
+    "qsGz": {"playerid"},
+    "xgkO": {"refereeid"},
+    "ijbM": {"cupid"},
+    "bqIi": {"tournamentid"},
+}
+
+# Precision foreign key references
+TABLE_FOREIGN_KEYS = {
+    "kISL": {
+        "DmlS": ("team", "Assigned Club Team"),
+        "mCXg": ("stadium", "Auxiliary Venue Link"),
+    },
+    "lyxL": {
+        "MYrf": ("stadium", "Home Stadium Venue"),
+        "mIlz": ("nation", "Country Nationality"),
+        "WLKn": ("player", "Club Captain / Star Player"),
+        "leagueid": ("league", "Domestic League"),
+    },
+    "mDGw": {
+        "MYrf": ("stadium", "Home Stadium Venue"),
+        "mIlz": ("nation", "Country"),
+    },
+    "Knen": {
+        "mIlz": ("nation", "Manager Nationality"),
+        "qwYd": ("team", "Managed Club Team"),
+        "mCXg": ("team", "Team Link"),
+    },
+    "AGmV": {
+        "bveC": ("player", "Contracted Player"),
+        "mCXg": ("player", "Player ID"),
+    },
+    "UlaA": {
+        "mCXg": ("player", "Award Recipient Player"),
+    },
+    "nrFl": {
+        "mCXg": ("player", "Player ID"),
+    },
+    "nhXl": {
+        "mCXg": ("player", "Player ID"),
+        "DmlS": ("team", "Club Team"),
+    },
+    "YNEf": {
+        "captainid": ("player", "Team Captain"),
+        "freekicktakerid": ("player", "Free Kick Taker"),
+        "penaltytakerid": ("player", "Penalty Taker"),
+    },
+    "sloG": {
+        "mCXg": ("stadium", "Stadium Link"),
+    },
+    "fGwQ": {
+        "LUfT": ("team", "Club Team for Chants"),
+    },
+    "WFUF": {
+        "daCW": ("team", "Club Team for Banners"),
+    },
+    "SizI": {
+        "TsLM": ("stadium", "Stadium / Club Net Link"),
+    }
+}
+
+# Contextual column names per table to eliminate cross-table ambiguity
+TABLE_COLUMN_NAMES = {
+    # Stadiums & Venues (kISL)
+    ("kISL", "fwCQ"): "Official Stadium Name",
+    ("kISL", "GdYI"): "Custom Stadium Name Flag",
+    ("kISL", "DmlS"): "Assigned Club Team ID",
+    ("kISL", "WMtm"): "Stadium Seating Tier Code",
+    ("kISL", "mCXg"): "Auxiliary Venue Link",
+    
+    # Stadiums & Venues (sloG, YBgI, SizI, OIcD, fGwQ)
+    ("sloG", "cCBB"): "Stadium 3D Lighting Preset ID",
+    ("sloG", "SPRd"): "Weather Lighting Condition",
+    ("sloG", "mCXg"): "Stadium Venue Geometry Link",
+    ("sloG", "RkEp"): "Lighting Active State",
+    ("sloG", "Rjoz"): "Pitch Turf Shader Texture ID",
+    
+    ("YBgI", "JMld"): "Pitchside Sponsor Board Texture ID",
+    ("YBgI", "Laxd"): "Pitchside Advertising Asset ID",
+    ("YBgI", "McUr"): "High Resolution Texture Flag",
+    ("YBgI", "NuNs"): "Sponsor Board Group Profile",
+    ("YBgI", "zlDt"): "Board Display Slot Index",
+    
+    ("OIcD", "xKVG"): "Stadium Acoustic Reverb Level",
+    ("OIcD", "BssH"): "Echo Delay Decay Profile",
+    ("OIcD", "mCXg"): "Stadium Acoustics Preset ID",
+    ("OIcD", "kePB"): "Crowd High-Frequency Filter",
+    ("OIcD", "HjSL"): "Crowd Low-Frequency Resonance",
+    ("OIcD", "ArvO"): "Stadium Roof Sound Reflection",
+    ("OIcD", "YxAQ"): "Tunnel Echo Coefficient",
+    ("OIcD", "Kjlq"): "Announcer PA System Gain",
+    ("OIcD", "jjwz"): "Atmosphere Bass Damping",
+    
+    # Players (nrFl, UlaA, AGmV, nhXl)
+    ("nrFl", "mCXg"): "Player Database ID",
+    ("nrFl", "Laxd"): "3D Head Model Asset ID",
+    ("nrFl", "McUr"): "Authentic Starhead 3D Scan (1=Yes, 0=Generic)",
+    
+    ("UlaA", "mCXg"): "Award Recipient Player ID",
+    ("UlaA", "xKVG"): "Award Category Trophy ID",
+    ("UlaA", "BssH"): "Accolade Season Year",
+    
+    ("AGmV", "bveC"): "Contracted Player ID",
+    ("AGmV", "mCXg"): "Player Database ID",
+    ("AGmV", "EZGA"): "Weekly Wage (EUR)",
+    ("AGmV", "VgjC"): "Contract Expiry Year",
+    
+    ("nhXl", "mCXg"): "Player Database ID",
+    ("nhXl", "ykFq"): "Player Relational ID",
+    ("nhXl", "DmlS"): "Club Team ID",
+    ("nhXl", "ETtk"): "Squad Jersey Shirt Number",
+    
+    # Managers (Knen)
+    ("Knen", "mCXg"): "Manager Club Team Link",
+    ("Knen", "EveZ"): "Manager Common Name",
+    ("Knen", "OoQO"): "Manager First Name",
+    ("Knen", "aArc"): "Manager Last Name",
+    ("Knen", "tFVQ"): "Manager 3D Head Asset ID",
+    ("Knen", "mIlz"): "Manager Nationality ID",
+    ("Knen", "qwYd"): "Managed Club Team ID",
+}
+
+def get_column_clean_name(col_sname: str, table_sname: str = "") -> str:
+    """Returns a clean, human-friendly column name without technical jargon or parenthesis noise."""
+    if table_sname and (table_sname, col_sname) in TABLE_COLUMN_NAMES:
+        return TABLE_COLUMN_NAMES[(table_sname, col_sname)]
+    
+    raw = COLUMN_NAMES.get(col_sname, col_sname)
+    if "(" in raw and ")" in raw:
+        inner = raw[raw.find("(")+1 : raw.rfind(")")].strip()
+        clean = inner.split(":")[0].strip()
+        if clean and not clean.startswith("type="):
+            return clean
+        return raw[:raw.find("(")].strip()
+    
+    clean = raw.replace("_", " ").strip()
+    return clean.title() if clean.islower() else clean
+
+def classify_column(table_sname: str, col_sname: str, col_type: int, bit_size: int, col_name: str = "") -> dict:
+    """Classifies a column into logical section, safety status, badge, and entity reference."""
+    clean_name = col_name or get_column_clean_name(col_sname, table_sname)
+    
+    # 1. Primary Key
+    if table_sname in TABLE_PRIMARY_KEYS and col_sname in TABLE_PRIMARY_KEYS[table_sname]:
+        return {
+            "section": "KEYS",
+            "role": "PRIMARY_KEY",
+            "badge": "[Primary Key]",
+            "badge_color": (255, 90, 90),
+            "warning": "⚠️ Primary Key: Modifying this ID changes this record's identity across the database!",
+            "target_entity": None,
+            "clean_name": clean_name
+        }
+    
+    # 2. Foreign Key
+    if table_sname in TABLE_FOREIGN_KEYS and col_sname in TABLE_FOREIGN_KEYS[table_sname]:
+        target, desc = TABLE_FOREIGN_KEYS[table_sname][col_sname]
+        return {
+            "section": "KEYS",
+            "role": "FOREIGN_KEY",
+            "badge": f"[Link -> {target.title()}]",
+            "badge_color": (255, 200, 60),
+            "warning": "",
+            "target_entity": target,
+            "clean_name": clean_name
+        }
+    
+    # 3. Flags / Booleans
+    if bit_size == 1 or col_sname.startswith("is_") or col_sname.endswith("_flag"):
+        return {
+            "section": "FLAGS",
+            "role": "BOOLEAN_FLAG",
+            "badge": "[Toggle]",
+            "badge_color": (0, 210, 255),
+            "warning": "",
+            "target_entity": None,
+            "clean_name": clean_name
+        }
+    
+    # 4. Large Raw Blob / Engine Bitmask
+    if bit_size > 32 and col_type == 3:
+        return {
+            "section": "ADVANCED",
+            "role": "RAW_BLOB",
+            "badge": f"[{bit_size}b Blob]",
+            "badge_color": (200, 160, 100),
+            "warning": "⚠️ Large Raw Bitfield: Direct modification may affect internal engine states.",
+            "target_entity": None,
+            "clean_name": clean_name
+        }
+    
+    # 5. Advanced / Unmapped Engine Variables
+    if col_sname not in COLUMN_NAMES and (table_sname, col_sname) not in TABLE_COLUMN_NAMES:
+        return {
+            "section": "ADVANCED",
+            "role": "ADVANCED_ENGINE",
+            "badge": "[Internal]",
+            "badge_color": (150, 150, 160),
+            "warning": "",
+            "target_entity": None,
+            "clean_name": clean_name
+        }
+        
+    # 6. Core Editable Fields
+    badge = "[Text]" if col_type == 0 else ("[Decimal]" if col_type == 4 else "[Editable]")
+    return {
+        "section": "CORE",
+        "role": "SAFE_VALUE",
+        "badge": badge,
+        "badge_color": (100, 220, 120),
+        "warning": "",
+        "target_entity": None,
+        "clean_name": clean_name
+    }
+
 def is_column_id_or_key(table_sname: str, col_sname: str) -> bool:
-    """Detects if a column is a primary key, foreign key, or critical pointer."""
-    # Special known ID columns in EA FC
-    if col_sname in ("eyGK", "GFLI", "wDHM", "mCXg", "ykFq", "OblE", "JMld", "vjla", "jIcz", "WLKn", "STID", "eqId", "idFG", "IDgE", "zoID", "nKiD", "MUiD", "eIDC", "TIDs"):
+    """Detects if a column is a primary key or critical foreign key."""
+    if table_sname in TABLE_PRIMARY_KEYS and col_sname in TABLE_PRIMARY_KEYS[table_sname]:
         return True
-    name = COLUMN_NAMES.get(col_sname, col_sname).lower()
-    return any(k in name for k in ["id", "code", "team", "player", "nation", "league", "stadium", "manager", "captain"])
+    return False
 
 def get_column_safety_warning(table_sname: str, col_sname: str, col_type: int, bit_size: int) -> str:
     """Returns a safety warning message for a specific column if applicable."""
-    if is_column_id_or_key(table_sname, col_sname):
-        return "⚠️ Primary Key / ID: Modifying this ID breaks relationships across other tables and may corrupt save files!"
-    if bit_size > 32:
-        return "⚠️ Large Bitmask / Binary Blob: Modifying raw bits directly may cause engine instability."
-    if col_type == 3 and bit_size == 1:
-        return "ℹ️ Flag / Boolean Field: 0 = Disabled, 1 = Enabled."
-    return ""
+    info = classify_column(table_sname, col_sname, col_type, bit_size)
+    return info["warning"]
 
 def validate_column_value(col_type: int, bit_size: int, val: any) -> tuple:
     """Validates user input value against column type and bit width. Returns (is_valid, error_msg)."""
@@ -411,6 +637,28 @@ TEAM_NAMES = {
 
 def get_team_name(team_id: int) -> str:
     return TEAM_NAMES.get(team_id, f"Team #{team_id}")
+
+NATION_NAMES = {
+    1: "Albania", 2: "Andorra", 3: "Austria", 4: "Belarus", 5: "Belgium",
+    6: "Bosnia & Herzegovina", 7: "Bulgaria", 8: "Croatia", 9: "Cyprus", 10: "Czech Republic",
+    11: "Denmark", 12: "Estonia", 13: "Faroe Islands", 14: "England", 15: "Finland",
+    16: "North Macedonia", 17: "France", 18: "France", 19: "Georgia", 21: "Germany",
+    22: "Greece", 23: "Hungary", 24: "Iceland", 25: "Republic of Ireland", 26: "Israel",
+    27: "Italy", 28: "Latvia", 29: "Liechtenstein", 30: "Lithuania", 31: "Luxembourg",
+    32: "Malta", 33: "Moldova", 34: "Netherlands", 35: "Northern Ireland", 36: "Poland",
+    37: "Poland", 38: "Norway", 39: "Portugal", 40: "Romania", 41: "Russia",
+    42: "San Marino", 43: "Scotland", 44: "Serbia", 45: "Spain", 46: "Slovakia",
+    47: "Slovenia", 48: "Sweden", 49: "Switzerland", 50: "Turkey", 51: "Ukraine",
+    52: "Argentina", 53: "Bolivia", 54: "Brazil", 55: "Chile", 56: "Colombia",
+    57: "Ecuador", 58: "Paraguay", 59: "Peru", 60: "Uruguay", 61: "Venezuela",
+    70: "Canada", 73: "Costa Rica", 81: "Jamaica", 83: "Morocco", 85: "Mexico",
+    89: "Panama", 95: "United States", 97: "Algeria", 98: "Cameroon", 101: "Ivory Coast",
+    104: "Ghana", 107: "Egypt", 110: "Nigeria", 111: "Senegal", 126: "Japan",
+    134: "Saudi Arabia", 136: "South Korea", 155: "New Zealand", 195: "Australia"
+}
+
+def get_nation_name(nation_id: int) -> str:
+    return NATION_NAMES.get(nation_id, f"Nation #{nation_id}")
 
 # Master reverse-engineered column name mappings across all 76 database tables
 COLUMN_NAMES = {
@@ -943,7 +1191,9 @@ COLUMN_NAMES = {
     "qljg": "image_asset_id (Story Illustration Thumbnail Asset ID)",
 }
 
-def get_column_display_name(c_sname: str) -> str:
+def get_column_display_name(c_sname: str, table_sname: str = "") -> str:
     """Returns human-readable column name or the raw shortname."""
+    if table_sname and (table_sname, c_sname) in TABLE_COLUMN_NAMES:
+        return TABLE_COLUMN_NAMES[(table_sname, c_sname)]
     return COLUMN_NAMES.get(c_sname, c_sname)
 

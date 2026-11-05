@@ -124,6 +124,9 @@ class DBTable:
             if len(chunk) < 16: break
             c_sname = chunk[:4].decode("latin-1")
             bit_size, col_type, bit_offset = struct.unpack("<III", chunk[4:16])
+            # Guard against packed string buffer length or anomalies leaking into integer bit_size
+            if col_type == 3 and (bit_size + bit_offset > self.rec_size * 8):
+                bit_size = min(32, max(1, self.rec_size * 8 - bit_offset))
             col = DBColumn(c_sname, bit_size, col_type, bit_offset)
             col.is_trailer = False
             self.columns.append(col)
@@ -134,7 +137,8 @@ class DBTable:
             if len(last_chunk) >= 8:
                 c_sname = last_chunk[:4].decode("latin-1")
                 bit_size = struct.unpack("<I", last_chunk[4:8])[0]
-                col = DBColumn(c_sname, bit_size, 3, 0)
+                trailer_offset = max(0, self.rec_size * 8 - bit_size)
+                col = DBColumn(c_sname, bit_size, 3, trailer_offset)
                 col.is_trailer = True
                 self.columns.append(col)
                 self.columns_map[c_sname] = col

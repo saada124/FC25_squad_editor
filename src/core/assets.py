@@ -8,6 +8,11 @@ from typing import Optional, Dict, Tuple
 import dearpygui.dearpygui as dpg
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from core.team_mappings import get_parent_club_id, is_women_team
+except ImportError:
+    from src.core.team_mappings import get_parent_club_id, is_women_team
+
 # Authentic Managers for major EA Sports FC 25 clubs
 AUTHENTIC_CLUB_MANAGERS: Dict[int, Dict[str, str]] = {
     243: {"name": "Carlo Ancelotti", "nationality": "Italy", "role": "Tactical Mastermind"},
@@ -243,6 +248,27 @@ class AssetManager:
         if os.path.exists(le_crest) and os.path.getsize(le_crest) > 0:
             if self._load_image_to_texture(le_crest, tag):
                 return tag
+
+        # Check crest inheritance from parent club (e.g. Women's club inheriting Men's crest)
+        parent_id = get_parent_club_id(team_id)
+        if parent_id != team_id:
+            parent_local = os.path.join(self.crests_dir, f"c{parent_id}.png")
+            if os.path.exists(parent_local) and os.path.getsize(parent_local) > 0:
+                if self._load_image_to_texture(parent_local, tag):
+                    return tag
+
+            parent_fallback = os.path.join(self.crests_dir, f"fallback_{parent_id}.png")
+            if os.path.exists(parent_fallback) and os.path.getsize(parent_fallback) > 0:
+                if self._load_image_to_texture(parent_fallback, tag):
+                    return tag
+
+            parent_le = os.path.join(self.le_crest_dir, f"l{parent_id}.png")
+            if os.path.exists(parent_le) and os.path.getsize(parent_le) > 0:
+                if self._load_image_to_texture(parent_le, tag):
+                    return tag
+
+            # Queue parent download since Futbin has men's club crests
+            self._queue_club_download(parent_id, tag, parent_local)
 
         # Create instant personalized fallback shield badge with club initials
         fallback_path = os.path.join(self.crests_dir, f"fallback_{team_id}.png")
