@@ -677,6 +677,10 @@ class SquadEditorApp:
                 dpg.add_button(label="+ Add Row", callback=self._on_click_add_row, width=85)
                 dpg.add_button(label="Clone", callback=self._on_clone_row, width=75)
                 dpg.add_button(label="Delete", callback=self._on_click_delete_row, width=80)
+                dpg.add_spacer(width=10)
+                dpg.add_button(label="📥 Export CSV", callback=self._on_export_table_csv, width=105)
+                dpg.add_button(label="📤 Import CSV", callback=self._on_import_table_csv, width=105)
+                dpg.add_button(label="📦 Export All (ZIP)", callback=self._on_export_all_tables_zip, width=130)
 
             dpg.add_spacer(height=4)
             # Table Safety & Stats Card
@@ -684,7 +688,10 @@ class SquadEditorApp:
                 dpg.add_text("[SAFE]", tag="db_table_safety_badge", color=(0, 255, 120))
                 dpg.add_text("|", color=(100, 100, 100))
                 dpg.add_text("Safe to edit player attributes directly.", tag="db_table_safety_desc", color=(200, 230, 255))
-            dpg.add_text("Rows: 0 | Columns: 0 | Record Size: 0 bytes", tag="db_table_stats_text", color=(150, 150, 150))
+            with dpg.group(horizontal=True):
+                dpg.add_text("Rows: 0 | Columns: 0 | Record Size: 0 bytes", tag="db_table_stats_text", color=(150, 150, 150))
+                dpg.add_spacer(width=20)
+                dpg.add_text("", tag="db_table_action_feedback", color=(0, 255, 180))
             dpg.add_separator()
 
             with dpg.group(horizontal=True):
@@ -1843,6 +1850,97 @@ class SquadEditorApp:
             dpg.delete_item("record_fields_container", children_only=True)
             dpg.configure_item("record_actions_group", show=False)
             dpg.set_value("record_save_feedback", f"✓ Deleted row #{deleted_idx}!")
+
+    def _on_export_table_csv(self):
+        """Exports the active database table to a CSV file."""
+        if not self.session.is_loaded:
+            dpg.set_value("db_table_action_feedback", "⚠️ Load a squad file first.")
+            return
+        tbl_sname = self.selected_table_sname
+        tbl = self.session.get_table(tbl_sname)
+        if not tbl:
+            dpg.set_value("db_table_action_feedback", "⚠️ Select a table first.")
+            return
+
+        disp_name = get_table_display_name(tbl_sname).replace(" ", "_").replace("/", "_")
+        default_filename = f"{tbl_sname}_{disp_name}.csv"
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        target = filedialog.asksaveasfilename(
+            title=f"Export Table '{tbl_sname}' to CSV",
+            initialfile=default_filename,
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+        )
+        root.destroy()
+
+        if not target:
+            return
+
+        ok, msg, count = self.session.export_table_csv(tbl_sname, target)
+        if ok:
+            dpg.set_value("db_table_action_feedback", f"✓ Exported {count:,} rows to {os.path.basename(target)}!")
+        else:
+            dpg.set_value("db_table_action_feedback", f"❌ {msg}")
+
+    def _on_import_table_csv(self):
+        """Imports records from a CSV file into the active database table."""
+        if not self.session.is_loaded:
+            dpg.set_value("db_table_action_feedback", "⚠️ Load a squad file first.")
+            return
+        tbl_sname = self.selected_table_sname
+        tbl = self.session.get_table(tbl_sname)
+        if not tbl:
+            dpg.set_value("db_table_action_feedback", "⚠️ Select a table first.")
+            return
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filepath = filedialog.askopenfilename(
+            title=f"Import CSV into Table '{tbl_sname}' ({get_table_display_name(tbl_sname)})",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+        )
+        root.destroy()
+
+        if not filepath:
+            return
+
+        ok, msg, stats = self.session.import_table_csv(tbl_sname, filepath)
+        if ok:
+            # Refresh table display & caches
+            self._load_db_table(self.selected_table_sname)
+            self._on_filter_players()
+            self._on_filter_teams()
+            dpg.set_value("db_table_action_feedback", f"✓ {msg}")
+        else:
+            dpg.set_value("db_table_action_feedback", f"❌ {msg}")
+
+    def _on_export_all_tables_zip(self):
+        """Exports all 76 database tables as individual CSVs inside a ZIP archive."""
+        if not self.session.is_loaded:
+            dpg.set_value("db_table_action_feedback", "⚠️ Load a squad file first.")
+            return
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        target = filedialog.asksaveasfilename(
+            title="Export All 76 Database Tables to ZIP",
+            initialfile="FC25_Squads_All_Tables.zip",
+            filetypes=[("ZIP Archives", "*.zip"), ("All Files", "*.*")]
+        )
+        root.destroy()
+
+        if not target:
+            return
+
+        ok, msg, count = self.session.export_all_tables_zip(target)
+        if ok:
+            dpg.set_value("db_table_action_feedback", f"✓ Exported {count} tables to {os.path.basename(target)}!")
+        else:
+            dpg.set_value("db_table_action_feedback", f"❌ {msg}")
 
     def _render_db_records_page(self):
         tbl = self.session.get_table(self.selected_table_sname)

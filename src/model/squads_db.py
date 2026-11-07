@@ -933,6 +933,75 @@ class SquadsSession:
     def get_table(self, sname: str) -> Optional[DBTable]:
         return self.db.tables_map.get(sname)
 
+    def export_table_csv(self, table_sname: str, target_path: str, include_labels: bool = True) -> Tuple[bool, str, int]:
+        """Exports all records of a specific database table to a CSV file."""
+        tbl = self.get_table(table_sname)
+        if not tbl:
+            return False, f"Table '{table_sname}' not found in active database.", 0
+        return tbl.export_to_csv(target_path, include_labels)
+
+    def import_table_csv(self, table_sname: str, source_path: str) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Imports records from a CSV file into the specified database table.
+        Automatically re-indexes session entity caches if the table affects players or clubs.
+        """
+        tbl = self.get_table(table_sname)
+        if not tbl:
+            return False, f"Table '{table_sname}' not found in active database.", {}
+        ok, msg, stats = tbl.import_from_csv(source_path)
+        if ok:
+            # Re-index if core entities were affected
+            if table_sname in ("CZUM", "RrqT", "lyxL", "mDGw", "rIsB", "kISL", "Knen"):
+                try:
+                    self._build_indexes()
+                except Exception as e:
+                    msg += f" (Note: index refresh error: {str(e)})"
+        return ok, msg, stats
+
+    def export_all_tables_zip(self, zip_target_path: str) -> Tuple[bool, str, int]:
+        """
+        Exports all 76 database tables as individual CSV files inside a single ZIP archive.
+        """
+        import zipfile
+        import io
+        import csv
+        try:
+            try:
+                from src.core.schema import get_column_display_name, get_table_display_name
+            except ImportError:
+                from core.schema import get_column_display_name, get_table_display_name
+
+            exported_count = 0
+            with zipfile.ZipFile(zip_target_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for tbl in self.db.tables:
+                    try:
+                        sio = io.StringIO()
+                        writer = csv.writer(sio)
+                        # Header
+                        headers = []
+                        for col in tbl.columns:
+                            disp = get_column_display_name(col.sname, tbl.sname)
+                            if disp and disp != col.sname:
+                                headers.append(f"{col.sname} [{disp}]")
+                            else:
+                                headers.append(col.sname)
+                        writer.writerow(headers)
+                        # Rows
+                        for rec in tbl.records:
+                            row_vals = [col.decode_value(rec) for col in tbl.columns]
+                            writer.writerow(row_vals)
+                        
+                        csv_data = sio.getvalue().encode("utf-8-sig")
+                        t_disp = get_table_display_name(tbl.sname).replace(" ", "_").replace("/", "_")
+                        filename = f"{tbl.sname}_{t_disp}.csv"
+                        zf.writestr(filename, csv_data)
+                        exported_count += 1
+                    except Exception:
+                        continue
+            return True, f"Successfully exported all {exported_count} tables to {zip_target_path}", exported_count
+        except Exception as e:
+            return False, f"Failed to export ZIP archive: {str(e)}", 0
+
     def format_table_row_summary(self, table_sname: str, row_idx: int) -> str:
         """Generates an informative, human-readable summary for a specific table row."""
         tbl = self.get_table(table_sname)

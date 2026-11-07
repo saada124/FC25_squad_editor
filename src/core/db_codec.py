@@ -63,21 +63,32 @@ class DBColumn:
     def encode_value(self, record_bytes: bytearray, val: Any) -> None:
         if self.col_type == 0: # String
             byte_start = self.bit_offset // 8
-            text_bytes = str(val).encode("latin-1", errors="replace") + b"\x00"
+            text_bytes = str(val if val is not None else "").encode("latin-1", errors="replace") + b"\x00"
             max_avail = len(record_bytes) - byte_start
             to_write = text_bytes[:max_avail]
             record_bytes[byte_start:byte_start + len(to_write)] = to_write
-        elif self.col_type == 4 and self.bit_size == 32: # Float
+        elif self.col_type == 4: # Float
             try:
                 flt_val = float(val)
-                raw_int = struct.unpack("<I", struct.pack("<f", flt_val))[0]
-                set_bits(record_bytes, self.bit_offset, 32, raw_int)
+                if self.bit_size == 32:
+                    raw_int = struct.unpack("<I", struct.pack("<f", flt_val))[0]
+                    set_bits(record_bytes, self.bit_offset, 32, raw_int)
+                elif self.bit_size == 16:
+                    raw_int = struct.unpack("<H", struct.pack("<e", flt_val))[0]
+                    set_bits(record_bytes, self.bit_offset, 16, raw_int)
+                else:
+                    int_val = int(flt_val)
+                    mask = (1 << self.bit_size) - 1
+                    clamped = max(0, min(int_val, mask))
+                    set_bits(record_bytes, self.bit_offset, self.bit_size, clamped)
             except Exception:
                 pass
-        else: # Integer / Bitfield
+        else: # 3 = Integer / Bitfield
             try:
                 int_val = int(val)
-                set_bits(record_bytes, self.bit_offset, self.bit_size, int_val)
+                mask = (1 << self.bit_size) - 1
+                clamped = max(0, min(int_val, mask))
+                set_bits(record_bytes, self.bit_offset, self.bit_size, clamped)
             except Exception:
                 pass
 
@@ -175,6 +186,91 @@ class DBTable:
             out.extend(rec)
         out.extend(self.trailing_bytes)
         return bytes(out)
+
+    def export_to_csv(self, filepath: str, include_labels: bool = True) -> Tuple[bool, str, int]:
+        """
+        Exports all records in this table to a CSV file.
+        Uses UTF-8-sig encoding for perfect compatibility with Microsoft Excel, LibreOffice, and Calc.
+        """
+        import csv
+        try:
+            try:
+                from src.core.schema import get_column_display_name
+            except ImportError:
+                try:
+                    from core.schema import get_column_display_name
+                except ImportError:
+                    get_column_display_name = lambda c, t="": c
+
+            with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                headers = []
+                for col in self.columns:
+                    disp = get_column_display_name(col.sname, self.sname) if include_labels else ""
+                    if disp and disp != col.sname:
+                        headers.append(f"{col.sname} [{disp}]")
+                    else:
+                        headers.append(col.sname)
+                writer.writerow(headers)
+
+                row_count = 0
+                for rec in self.records:
+                    row_vals = [col.decode_value(rec) for col in self.columns]
+                    writer.writerow(row_vals)
+                    row_count += 1
+            return True, f"Successfully exported {row_count:,} records to {filepath}", row_count
+        except Exception as e:
+            return False, f"Failed to export CSV: {str(e)}", 0
+
+    def import_from_csv(self, filepath: str) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Imports records from a CSV file into this table.
+        Matches columns by 4-character shortname (supports 'wDHM' or 'wDHM [Overall]').
+        Validates bit-ranges and updates in-place or appends new rows.
+        """
+        import csv
+        stats = {"rows_read": 0, "rows_updated": 0, "rows_appended": 0, "columns_matched": 0}
+        try:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                try:
+                    raw_headers = next(reader)
+                except StopIteration:
+                    return False, "CSV file is empty", stats
+
+                col_index_map: Dict[int, DBColumn] = {}
+                for idx, h in enumerate(raw_headers):
+                    h_clean = h.strip()
+                    sname = h_clean.split()[0].replace("[", "").replace("]", "")[:4]
+                    if sname in self.columns_map:
+                        col_index_map[idx] = self.columns_map[sname]
+
+                stats["columns_matched"] = len(col_index_map)
+                if not col_index_map:
+                    return False, "No matching table columns found in CSV header", stats
+
+                row_idx = 0
+                for row in reader:
+                    stats["rows_read"] += 1
+                    if row_idx < len(self.records):
+                        rec = self.records[row_idx]
+                        stats["rows_updated"] += 1
+                    else:
+                        rec = bytearray(self.rec_size)
+                        self.records.append(rec)
+                        stats["rows_appended"] += 1
+
+                    for c_idx, val_str in enumerate(row):
+                        if c_idx in col_index_map:
+                            col = col_index_map[c_idx]
+                            col.encode_value(rec, val_str.strip())
+                    row_idx += 1
+
+                self.written_records = len(self.records)
+                msg = f"Imported {stats['rows_read']:,} rows ({stats['rows_updated']:,} updated, {stats['rows_appended']:,} appended) across {stats['columns_matched']} columns."
+                return True, msg, stats
+        except Exception as e:
+            return False, f"Failed to import CSV: {str(e)}", stats
 
 class FIFADatabase:
     """
