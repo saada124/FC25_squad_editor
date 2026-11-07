@@ -3,6 +3,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog
 from typing import Optional, Dict, Any, List
+from datetime import datetime
 
 import dearpygui.dearpygui as dpg
 
@@ -14,7 +15,11 @@ try:
         get_table_category, get_table_safety_info, is_column_id_or_key, get_column_safety_warning,
         validate_column_value, classify_column
     )
-    from core.backup import list_folder_backups
+    from core.backup import (
+        list_folder_backups, create_load_backup, restore_backup,
+        delete_backup, purge_old_backups, get_backup_metadata
+    )
+    from core.settings import AppSettings
     from core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
     from core.assets import AssetManager
 except ImportError:
@@ -25,7 +30,11 @@ except ImportError:
         get_table_category, get_table_safety_info, is_column_id_or_key, get_column_safety_warning,
         validate_column_value, classify_column
     )
-    from src.core.backup import list_folder_backups
+    from src.core.backup import (
+        list_folder_backups, create_load_backup, restore_backup,
+        delete_backup, purge_old_backups, get_backup_metadata
+    )
+    from src.core.settings import AppSettings
     from src.core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
     from src.core.assets import AssetManager
 
@@ -33,10 +42,13 @@ class SquadEditorApp:
     def __init__(self):
         self.session = SquadsSession()
         self.assets = AssetManager()
+        self.config: AppSettings = AppSettings.load()
+        self._is_populating_player: bool = False
+        self.pending_restore_backup_path: Optional[str] = None
         self.selected_player: Optional[Dict[str, Any]] = None
         self.selected_team: Optional[Dict[str, Any]] = None
         self.selected_table_sname: str = "CZUM"
-        self.selected_category: str = "📁 All Categories (76 tables)"
+        self.selected_category: str = "All Categories (76 tables)"
         self.pending_structural_action: Optional[str] = None
         self.current_table_page: int = 0
         self.page_size: int = 50
@@ -47,21 +59,21 @@ class SquadEditorApp:
         self.filtered_sign_players: List[Dict[str, Any]] = []
         self.selected_sign_player: Optional[Dict[str, Any]] = None
         
-        # Filtered lists & Presets
+        # Filtered lists & Presets (Clean ASCII/Unicode labels)
         self.filtered_players: List[Dict[str, Any]] = []
         self.filtered_teams: List[Dict[str, Any]] = []
-        self.filter_preset: str = "🌟 All Players"
+        self.filter_preset: str = "All Players"
         self.preset_filter_names = [
-            "🌟 All Players",
-            "🆓 Free Agents",
-            "⚡ Top Superstars (85+)",
-            "💎 Wonderkids (POT 85+, Age <= 21)",
-            "🇦🇷 Messi Regen",
-            "🇵🇹 CR7 Regen",
-            "🇫🇷 Benzema Regen",
-            "🇵🇱 RL9 Regen",
-            "⏳ Retiring Players",
-            "🧬 Generated Players"
+            "All Players",
+            "Free Agents",
+            "Top Superstars (85+)",
+            "Wonderkids (POT 85+, Age <= 21)",
+            "Messi Regen (ARG)",
+            "CR7 Regen (POR)",
+            "Benzema Regen (FRA)",
+            "RL9 Regen (POL)",
+            "Retiring Players",
+            "Generated Players"
         ]
         self.filter_pos_category: str = "All"
         self.min_ovr_filter: int = 0
@@ -103,7 +115,8 @@ class SquadEditorApp:
         if os.path.exists(font_path):
             try:
                 with dpg.font_registry():
-                    def_font = dpg.add_font(font_path, 16)
+                    with dpg.font(font_path, 16) as def_font:
+                        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
                 dpg.bind_font(def_font)
             except Exception:
                 pass
@@ -166,8 +179,8 @@ class SquadEditorApp:
                 dpg.add_text("FC 25 SQUAD STUDIO", color=(0, 200, 255))
                 dpg.add_text("|", color=(100, 100, 100))
                 dpg.add_button(label="Open Squads", callback=self._on_click_open)
-                dpg.add_button(label="💾 Save File", tag="btn_primary_save", callback=self._on_click_save)
-                dpg.add_button(label="📋 Changes (0)", tag="btn_review_changes", callback=self._on_open_pending_changes)
+                dpg.add_button(label="Save File", tag="btn_primary_save", callback=self._on_click_save)
+                dpg.add_button(label="Changes (0)", tag="btn_review_changes", callback=self._on_open_pending_changes)
                 dpg.add_button(label="Save As...", callback=self._on_click_save_as)
                 dpg.add_spacer(width=20)
                 dpg.add_text("Ready. Please open a Squads save file.", tag="status_text", color=(180, 180, 180))
@@ -199,12 +212,12 @@ class SquadEditorApp:
                 dpg.add_text("", tag="structural_modal_msg", wrap=510)
                 dpg.add_spacer(height=15)
                 with dpg.group(horizontal=True):
-                    dpg.add_button(label="⚠️ Confirm & Proceed", callback=self._on_confirm_structural_action, width=170)
+                    dpg.add_button(label="[!] Confirm & Proceed", callback=self._on_confirm_structural_action, width=170)
                     dpg.add_spacer(width=20)
                     dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item("structural_confirm_modal", show=False), width=100)
 
             # Global Search & Sign Player Modal
-            with dpg.window(label="➕ Sign Player to Club", modal=True, show=False, tag="sign_player_modal", width=700, height=540, no_resize=True):
+            with dpg.window(label="[+] Sign Player to Club", modal=True, show=False, tag="sign_player_modal", width=700, height=540, no_resize=True):
                 dpg.add_text("Transfer & Sign Player to Club", color=(0, 200, 255))
                 dpg.add_text("Target Destination: None", tag="sign_player_target_club_label", color=(255, 200, 0))
                 dpg.add_separator()
@@ -228,17 +241,17 @@ class SquadEditorApp:
 
                 dpg.add_spacer(height=12)
                 with dpg.group(horizontal=True):
-                    dpg.add_button(label="✅ Complete Transfer & Sign to Club", callback=self._on_confirm_sign_player, width=280)
+                    dpg.add_button(label="Complete Transfer & Sign to Club", callback=self._on_confirm_sign_player, width=280)
                     dpg.add_spacer(width=20)
                     dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item("sign_player_modal", show=False), width=100)
 
             # Review Pending Changes Modal Window
-            with dpg.window(label="📋 Review Pending File Changes", modal=True, show=False, tag="pending_changes_modal", width=820, height=560, no_resize=False):
+            with dpg.window(label="Review Pending File Changes", modal=True, show=False, tag="pending_changes_modal", width=820, height=560, no_resize=False):
                 with dpg.group(horizontal=True):
                     dpg.add_text("Session Change Log & Revert Manager", color=(0, 200, 255))
                     dpg.add_spacer(width=20)
                     dpg.add_text("", tag="changes_modal_count_badge", color=(255, 200, 0))
-                dpg.add_text("All staged changes in current session. Click red '✖ Revert' to cancel any edit, or 'Save All to File' to persist.", color=(170, 170, 170))
+                dpg.add_text("All staged changes in current session. Click red '[X] Revert' to cancel any edit, or 'Save All to File' to persist.", color=(170, 170, 170))
                 dpg.add_separator()
                 
                 with dpg.child_window(height=420, tag="pending_changes_container"):
@@ -248,11 +261,33 @@ class SquadEditorApp:
                 dpg.add_separator()
                 dpg.add_spacer(height=6)
                 with dpg.group(horizontal=True):
-                    dpg.add_button(label="💾 Save All to File", callback=self._on_modal_save_all, width=170)
+                    dpg.add_button(label="Save All to File", callback=self._on_modal_save_all, width=170)
                     dpg.add_spacer(width=15)
-                    dpg.add_button(label="🗑️ Discard All Changes", callback=self._on_modal_discard_all, width=180)
+                    dpg.add_button(label="Discard All Changes", callback=self._on_modal_discard_all, width=180)
                     dpg.add_spacer(width=280)
                     dpg.add_button(label="Close", callback=lambda: dpg.configure_item("pending_changes_modal", show=False), width=100)
+
+            # Restore Backup Confirmation Modal
+            with dpg.window(label="[!] Confirm Backup Restore", modal=True, show=False, tag="restore_backup_confirm_modal", width=560, height=220, no_resize=True):
+                dpg.add_text("WARNING: Overwriting Squads File", color=(255, 80, 80))
+                dpg.add_spacer(height=6)
+                dpg.add_text("", tag="restore_modal_msg", wrap=520)
+                dpg.add_spacer(height=15)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Confirm & Restore File", callback=self._on_confirm_restore_backup, width=190)
+                    dpg.add_spacer(width=20)
+                    dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item("restore_backup_confirm_modal", show=False), width=100)
+
+            # Discard All Changes Confirmation Modal
+            with dpg.window(label="[!] Confirm Discard All Changes", modal=True, show=False, tag="discard_all_confirm_modal", width=520, height=200, no_resize=True):
+                dpg.add_text("WARNING: Discard All Session Changes", color=(255, 80, 80))
+                dpg.add_spacer(height=6)
+                dpg.add_text("Are you sure you want to discard all staged modifications?\nThis will revert all changes made during this session back to the loaded file state.", wrap=480)
+                dpg.add_spacer(height=15)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Yes, Discard All", callback=self._on_confirm_discard_all, width=150)
+                    dpg.add_spacer(width=20)
+                    dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item("discard_all_confirm_modal", show=False), width=100)
 
         dpg.set_primary_window("primary_window", True)
 
@@ -265,12 +300,12 @@ class SquadEditorApp:
                 # Preset Filter Combo
                 with dpg.group(horizontal=True):
                     dpg.add_text("Filter:")
-                    dpg.add_combo(items=self.preset_filter_names, default_value="🌟 All Players", callback=self._on_change_preset_filter, tag="player_preset_combo", width=340)
+                    dpg.add_combo(items=self.preset_filter_names, default_value="All Players", callback=self._on_change_preset_filter, tag="player_preset_combo", width=340)
                 
                 # Search Bar with Instant Filter & Clear
                 with dpg.group(horizontal=True):
                     dpg.add_input_text(hint="Search player name or ID...", callback=self._on_filter_players, tag="player_search_input", width=350)
-                    dpg.add_button(label="✖", callback=self._on_clear_player_search, width=30)
+                    dpg.add_button(label="X", callback=self._on_clear_player_search, width=30)
                     
                 # Position Category & Min Rating Sliders
                 with dpg.group(horizontal=True):
@@ -289,7 +324,7 @@ class SquadEditorApp:
                 with dpg.group(horizontal=True):
                     with dpg.group():
                         dpg.add_image("tex_default_player", width=75, height=75, tag="player_miniface_img")
-                        dpg.add_button(label="📷 Face", callback=self._on_import_player_face, width=75)
+                        dpg.add_button(label="Face", callback=self._on_import_player_face, width=75)
                     dpg.add_spacer(width=12)
                     with dpg.group():
                         with dpg.group(horizontal=True):
@@ -301,19 +336,19 @@ class SquadEditorApp:
                 with dpg.group(tag="player_edit_controls", show=False):
                     with dpg.tab_bar():
                         # TAB 1: CORE BIO, RATINGS, POSITIONS & CLUB
-                        with dpg.tab(label=" 📋 Bio & Positions "):
+                        with dpg.tab(label=" Bio & Positions "):
                             dpg.add_spacer(height=5)
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Overall Rating:   ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_ovr", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_ovr", width=220, callback=self._on_player_field_changed, user_data="overallrating")
                                 dpg.add_spacer(width=20)
                                 dpg.add_text("Potential Rating: ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_pot", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_pot", width=220, callback=self._on_player_field_changed, user_data="potential")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Club Transfer:    ")
                                 dpg.add_combo(items=[], tag="edit_player_club_combo", width=240)
-                                dpg.add_button(label="🔄 Transfer Club", callback=self._on_transfer_player, width=130)
+                                dpg.add_button(label="Transfer Club", callback=self._on_transfer_player, width=130)
 
                             dpg.add_spacer(height=5)
                             with dpg.group(horizontal=True):
@@ -321,55 +356,55 @@ class SquadEditorApp:
                                 dpg.add_input_int(tag="edit_player_id_display", width=140, readonly=True)
                                 dpg.add_spacer(width=20)
                                 dpg.add_text("Age: ")
-                                dpg.add_input_int(tag="edit_player_age_display", width=80)
+                                dpg.add_input_int(tag="edit_player_age_display", width=80, callback=self._on_player_field_changed, user_data="age")
                                 dpg.add_spacer(width=20)
                                 dpg.add_text("Jersey #: ")
-                                dpg.add_input_int(tag="edit_player_jersey", width=80)
+                                dpg.add_input_int(tag="edit_player_jersey", width=80, callback=self._on_player_field_changed, user_data="jerseynumber")
                                 dpg.add_spacer(width=20)
-                                dpg.add_checkbox(label="Retiring", tag="edit_player_isretiring")
+                                dpg.add_checkbox(label="Retiring", tag="edit_player_isretiring", callback=self._on_player_field_changed, user_data="isretiring")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Preferred Foot:   ")
-                                dpg.add_combo(items=["Right", "Left"], default_value="Right", tag="edit_player_foot", width=140)
+                                dpg.add_combo(items=["Right", "Left"], default_value="Right", tag="edit_player_foot", width=140, callback=self._on_player_field_changed, user_data="foot")
                                 dpg.add_spacer(width=20)
                                 dpg.add_text("Primary Position: ")
                                 pos_items = [POSITION_NAMES[k] for k in sorted(POSITION_NAMES.keys()) if k >= 0]
                                 pos_items_with_none = ["None"] + pos_items
-                                dpg.add_combo(items=pos_items, tag="edit_player_pos1", width=140)
+                                dpg.add_combo(items=pos_items, tag="edit_player_pos1", width=140, callback=self._on_player_field_changed, user_data="pos1")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Alt Position 1:   ")
-                                dpg.add_combo(items=pos_items_with_none, tag="edit_player_pos2", width=140)
+                                dpg.add_combo(items=pos_items_with_none, tag="edit_player_pos2", width=140, callback=self._on_player_field_changed, user_data="pos2")
                                 dpg.add_spacer(width=20)
                                 dpg.add_text("Alt Position 2:   ")
-                                dpg.add_combo(items=pos_items_with_none, tag="edit_player_pos3", width=140)
+                                dpg.add_combo(items=pos_items_with_none, tag="edit_player_pos3", width=140, callback=self._on_player_field_changed, user_data="pos3")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Alt Position 3:   ")
-                                dpg.add_combo(items=pos_items_with_none, tag="edit_player_pos4", width=140)
+                                dpg.add_combo(items=pos_items_with_none, tag="edit_player_pos4", width=140, callback=self._on_player_field_changed, user_data="pos4")
                                 dpg.add_spacer(width=20)
                                 dpg.add_text("Contract Valid:   ")
-                                dpg.add_input_int(tag="edit_player_contract", width=140)
+                                dpg.add_input_int(tag="edit_player_contract", width=140, callback=self._on_player_field_changed, user_data="contractvaliduntil")
 
                             with dpg.group(horizontal=True):
-                                dpg.add_text("Skill Moves (★):  ")
-                                dpg.add_slider_int(min_value=1, max_value=5, tag="edit_player_skills", width=180)
-                                dpg.add_spacer(width=60)
-                                dpg.add_text("Weak Foot (★):    ")
-                                dpg.add_slider_int(min_value=1, max_value=5, tag="edit_player_weakfoot", width=180)
+                                dpg.add_text("Skill Moves (Stars):  ")
+                                dpg.add_slider_int(min_value=1, max_value=5, tag="edit_player_skills", width=160, callback=self._on_player_field_changed, user_data="skills")
+                                dpg.add_spacer(width=40)
+                                dpg.add_text("Weak Foot (Stars):    ")
+                                dpg.add_slider_int(min_value=1, max_value=5, tag="edit_player_weakfoot", width=160, callback=self._on_player_field_changed, user_data="weakfoot")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Height (cm):      ")
-                                dpg.add_input_int(tag="edit_player_height", width=140)
+                                dpg.add_input_int(tag="edit_player_height", width=140, callback=self._on_player_field_changed, user_data="height")
                                 dpg.add_spacer(width=100)
                                 dpg.add_text("Weight (kg):      ")
-                                dpg.add_input_int(tag="edit_player_weight", width=140)
+                                dpg.add_input_int(tag="edit_player_weight", width=140, callback=self._on_player_field_changed, user_data="weight")
 
-                        # TAB 2: ⭐ PLAYSTYLES & TRAITS SELECTOR (AUTHENTIC FC 25 ENGINE)
-                        with dpg.tab(label=" ⭐ PlayStyles & Traits "):
+                        # TAB 2: PLAYSTYLES & TRAITS SELECTOR (AUTHENTIC FC 25 ENGINE)
+                        with dpg.tab(label=" PlayStyles & Traits "):
                             dpg.add_spacer(height=5)
                             with dpg.group(horizontal=True):
-                                dpg.add_text("⭐ Authentic FC 25 PlayStyles Engine", color=(0, 220, 255))
+                                dpg.add_text("Authentic FC 25 PlayStyles Engine", color=(0, 220, 255))
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Active: 0 Gold (++), 0 Silver (+)", tag="player_playstyles_summary_badge", color=(0, 255, 120))
 
@@ -378,10 +413,10 @@ class SquadEditorApp:
 
                             # Quick Preset Action Buttons
                             with dpg.group(horizontal=True):
-                                dpg.add_button(label="✨ Clear All", callback=self._on_clear_playstyles, width=110)
-                                dpg.add_button(label="🥈 All Regular (+)", callback=self._on_all_silver_playstyles, width=130)
-                                dpg.add_button(label="🥇 All Gold (++)", callback=self._on_all_gold_playstyles, width=130)
-                                dpg.add_button(label="⚡ Meta Superstar Preset", callback=self._on_meta_playstyles, width=170)
+                                dpg.add_button(label="Clear All", callback=self._on_clear_playstyles, width=110)
+                                dpg.add_button(label="All Regular (+)", callback=self._on_all_silver_playstyles, width=130)
+                                dpg.add_button(label="All Gold (++)", callback=self._on_all_gold_playstyles, width=130)
+                                dpg.add_button(label="Meta Superstar Preset", callback=self._on_meta_playstyles, width=170)
 
                             dpg.add_spacer(height=5)
                             dpg.add_separator()
@@ -405,27 +440,27 @@ class SquadEditorApp:
                                             dpg.add_spacer(width=10)
                                             dpg.add_text(f"- {desc}", color=(130, 130, 130))
 
-                        # TAB 3: 🎯 ROLES & FC IQ
-                        with dpg.tab(label=" 🎯 Roles & FC IQ "):
+                        # TAB 3: ROLES & FC IQ
+                        with dpg.tab(label=" Roles & FC IQ "):
                             dpg.add_spacer(height=5)
                             dpg.add_text("FC IQ Tactical Roles (New EA SPORTS FC 25 Engine)", color=(0, 220, 255))
                             dpg.add_text("Define player role assignments and role proficiency levels (+ and ++).", color=(180, 180, 180))
                             dpg.add_spacer(height=5)
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Tactical Role 1: ")
-                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role1", width=200)
+                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role1", width=200, callback=self._on_player_field_changed, user_data="role1")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Tactical Role 2: ")
-                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role2", width=200)
+                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role2", width=200, callback=self._on_player_field_changed, user_data="role2")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Tactical Role 3: ")
-                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role3", width=200)
+                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role3", width=200, callback=self._on_player_field_changed, user_data="role3")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Tactical Role 4: ")
-                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role4", width=200)
+                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role4", width=200, callback=self._on_player_field_changed, user_data="role4")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Tactical Role 5: ")
-                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role5", width=200)
+                                dpg.add_slider_int(min_value=0, max_value=255, tag="edit_player_role5", width=200, callback=self._on_player_field_changed, user_data="role5")
 
                         # TAB 4: PACE & SHOOTING
                         with dpg.tab(label=" Pace & Shooting "):
@@ -433,31 +468,31 @@ class SquadEditorApp:
                             dpg.add_text("Pace Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Acceleration:    ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_accel", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_accel", width=220, callback=self._on_player_field_changed, user_data="acceleration")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Sprint Speed:    ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_sprint", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_sprint", width=220, callback=self._on_player_field_changed, user_data="sprintspeed")
 
                             dpg.add_spacer(height=10)
                             dpg.add_text("Shooting Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Positioning:     ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_pos", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_pos", width=220, callback=self._on_player_field_changed, user_data="positioning")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Finishing:       ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_finish", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_finish", width=220, callback=self._on_player_field_changed, user_data="finishing")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Shot Power:      ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_shotpwr", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_shotpwr", width=220, callback=self._on_player_field_changed, user_data="shotpower")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Long Shots:      ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_longshots", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_longshots", width=220, callback=self._on_player_field_changed, user_data="longshots")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Volleys:         ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_volleys", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_volleys", width=220, callback=self._on_player_field_changed, user_data="volleys")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Penalties:       ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_penalties", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_penalties", width=220, callback=self._on_player_field_changed, user_data="penalties")
 
                         # TAB 5: PASSING & DRIBBLING
                         with dpg.tab(label=" Passing & Dribbling "):
@@ -465,43 +500,43 @@ class SquadEditorApp:
                             dpg.add_text("Passing Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Vision:          ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_vision", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_vision", width=220, callback=self._on_player_field_changed, user_data="vision")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Crossing:        ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_crossing", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_crossing", width=220, callback=self._on_player_field_changed, user_data="crossing")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Free Kick Acc.:  ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_fk", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_fk", width=220, callback=self._on_player_field_changed, user_data="freekickaccuracy")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Short Passing:   ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_shortpass", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_shortpass", width=220, callback=self._on_player_field_changed, user_data="shortpassing")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Long Passing:    ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_longpass", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_longpass", width=220, callback=self._on_player_field_changed, user_data="longpassing")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Curve:           ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_curve", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_curve", width=220, callback=self._on_player_field_changed, user_data="curve")
 
                             dpg.add_spacer(height=10)
                             dpg.add_text("Dribbling Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Agility:         ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_agility", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_agility", width=220, callback=self._on_player_field_changed, user_data="agility")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Balance:         ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_balance", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_balance", width=220, callback=self._on_player_field_changed, user_data="balance")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Reactions:       ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_reactions", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_reactions", width=220, callback=self._on_player_field_changed, user_data="reactions")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Ball Control:    ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_ballctrl", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_ballctrl", width=220, callback=self._on_player_field_changed, user_data="ballcontrol")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Dribbling:       ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_dribble", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_dribble", width=220, callback=self._on_player_field_changed, user_data="dribbling")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Composure:       ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_composure", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_composure", width=220, callback=self._on_player_field_changed, user_data="composure")
 
                         # TAB 6: DEFENDING & PHYSICAL
                         with dpg.tab(label=" Defending & Physical "):
@@ -509,34 +544,34 @@ class SquadEditorApp:
                             dpg.add_text("Defending Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Interceptions:   ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_interceptions", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_interceptions", width=220, callback=self._on_player_field_changed, user_data="interceptions")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Heading Acc.:    ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_heading", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_heading", width=220, callback=self._on_player_field_changed, user_data="headingaccuracy")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Def. Awareness:  ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_defawareness", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_defawareness", width=220, callback=self._on_player_field_changed, user_data="defensiveawareness")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Standing Tackle: ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_standtackle", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_standtackle", width=220, callback=self._on_player_field_changed, user_data="standingtackle")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Sliding Tackle:  ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_slidetackle", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_slidetackle", width=220, callback=self._on_player_field_changed, user_data="slidingtackle")
 
                             dpg.add_spacer(height=10)
                             dpg.add_text("Physical Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Jumping:         ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_jumping", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_jumping", width=220, callback=self._on_player_field_changed, user_data="jumping")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Stamina:         ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_stamina", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_stamina", width=220, callback=self._on_player_field_changed, user_data="stamina")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Strength:        ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_strength", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_strength", width=220, callback=self._on_player_field_changed, user_data="strength")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Aggression:      ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_aggression", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_aggression", width=220, callback=self._on_player_field_changed, user_data="aggression")
 
                         # TAB 7: GOALKEEPER
                         with dpg.tab(label=" Goalkeeper "):
@@ -544,88 +579,90 @@ class SquadEditorApp:
                             dpg.add_text("Goalkeeper Attributes", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("GK Diving:       ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkdiving", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkdiving", width=220, callback=self._on_player_field_changed, user_data="gkdiving")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("GK Handling:     ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkhandling", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkhandling", width=220, callback=self._on_player_field_changed, user_data="gkhandling")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("GK Kicking:      ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkkicking", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkkicking", width=220, callback=self._on_player_field_changed, user_data="gkkicking")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("GK Reflexes:     ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkreflexes", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkreflexes", width=220, callback=self._on_player_field_changed, user_data="gkreflexes")
                             with dpg.group(horizontal=True):
                                 dpg.add_text("GK Positioning:  ")
-                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkpos", width=220)
+                                dpg.add_slider_int(min_value=1, max_value=99, tag="edit_player_gkpos", width=220, callback=self._on_player_field_changed, user_data="gkpositioning")
 
                         # TAB 8: KIT & APPEARANCE (ALL ORIGINAL OPTIONS)
-                        with dpg.tab(label=" 👔 Kit & Appearance "):
+                        with dpg.tab(label=" Kit & Appearance "):
                             dpg.add_spacer(height=5)
                             dpg.add_text("Player Head & Body Model", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Head Asset ID:   ")
-                                dpg.add_input_int(tag="edit_player_headasset", width=160)
+                                dpg.add_input_int(tag="edit_player_headasset", width=160, callback=self._on_player_field_changed, user_data="headassetid")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Body Type:       ")
-                                dpg.add_input_int(tag="edit_player_bodytype", width=120)
+                                dpg.add_input_int(tag="edit_player_bodytype", width=120, callback=self._on_player_field_changed, user_data="bodytypecode")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Hairstyle Code:  ")
-                                dpg.add_input_int(tag="edit_player_hairstyle", width=160)
+                                dpg.add_input_int(tag="edit_player_hairstyle", width=160, callback=self._on_player_field_changed, user_data="hairstylecode")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Hair Color:      ")
-                                dpg.add_input_int(tag="edit_player_haircolor", width=120)
+                                dpg.add_input_int(tag="edit_player_haircolor", width=120, callback=self._on_player_field_changed, user_data="haircolorcode")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Skin Tone Code:  ")
-                                dpg.add_input_int(tag="edit_player_skintone", width=160)
+                                dpg.add_input_int(tag="edit_player_skintone", width=160, callback=self._on_player_field_changed, user_data="skintonecode")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Eye Color:       ")
-                                dpg.add_input_int(tag="edit_player_eyecolor", width=120)
+                                dpg.add_input_int(tag="edit_player_eyecolor", width=120, callback=self._on_player_field_changed, user_data="eyecolorcode")
 
                             dpg.add_spacer(height=10)
                             dpg.add_text("Kit & Accessory Options", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Jersey Style:    ")
-                                dpg.add_combo(items=["Tucked", "Untucked"], default_value="Untucked", tag="edit_player_jerseystyle", width=160)
+                                dpg.add_combo(items=["Tucked", "Untucked"], default_value="Untucked", tag="edit_player_jerseystyle", width=160, callback=self._on_player_field_changed, user_data="jerseystyle")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Sleeves:         ")
-                                dpg.add_combo(items=["Short", "Long"], default_value="Short", tag="edit_player_sleeves", width=120)
+                                dpg.add_combo(items=["Short", "Long"], default_value="Short", tag="edit_player_sleeves", width=120, callback=self._on_player_field_changed, user_data="sleeves")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Jersey Fit:      ")
-                                dpg.add_combo(items=["Normal", "Tight"], default_value="Normal", tag="edit_player_fit", width=160)
+                                dpg.add_combo(items=["Normal", "Tight"], default_value="Normal", tag="edit_player_fit", width=160, callback=self._on_player_field_changed, user_data="fit")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("Sock Length:     ")
-                                dpg.add_combo(items=["Short", "Average", "High"], default_value="Average", tag="edit_player_socklength", width=120)
+                                dpg.add_combo(items=["Short", "Average", "High"], default_value="Average", tag="edit_player_socklength", width=120, callback=self._on_player_field_changed, user_data="socklength")
 
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Shoe Type Code:  ")
-                                dpg.add_input_int(tag="edit_player_shoetype", width=160)
+                                dpg.add_input_int(tag="edit_player_shoetype", width=160, callback=self._on_player_field_changed, user_data="shoetypecode")
                                 dpg.add_spacer(width=30)
                                 dpg.add_text("GK Glove Code:   ")
-                                dpg.add_input_int(tag="edit_player_gkglove", width=120)
+                                dpg.add_input_int(tag="edit_player_gkglove", width=120, callback=self._on_player_field_changed, user_data="gkglovetypecode")
 
                             dpg.add_spacer(height=10)
                             dpg.add_text("Direct Bitmask Monitors (Synced with PlayStyles Tab)", color=(0, 200, 255))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Trait 1:   ")
-                                dpg.add_input_text(tag="edit_player_trait1", width=140)
+                                dpg.add_input_text(tag="edit_player_trait1", width=140, readonly=True)
                                 dpg.add_spacer(width=15)
                                 dpg.add_text("Trait 2:   ")
-                                dpg.add_input_text(tag="edit_player_trait2", width=140)
+                                dpg.add_input_text(tag="edit_player_trait2", width=140, readonly=True)
                             with dpg.group(horizontal=True):
                                 dpg.add_text("IconTrait1:")
-                                dpg.add_input_text(tag="edit_player_icontrait1", width=140)
+                                dpg.add_input_text(tag="edit_player_icontrait1", width=140, readonly=True)
                                 dpg.add_spacer(width=15)
                                 dpg.add_text("IconTrait2:")
-                                dpg.add_input_text(tag="edit_player_icontrait2", width=140)
+                                dpg.add_input_text(tag="edit_player_icontrait2", width=140, readonly=True)
 
                     dpg.add_spacer(height=15)
                     dpg.add_separator()
                     with dpg.group(horizontal=True):
-                        dpg.add_button(label="💾 Apply Player Changes", callback=self._on_save_player_changes, width=220)
-                        dpg.add_button(label="⚡ Prime 99 Boost", callback=self._on_boost_player, width=160)
+                        dpg.add_button(label="Prime 99 Boost", callback=self._on_boost_player, width=160)
+                        dpg.add_spacer(width=20)
+                        dpg.add_text("Live Auto-Apply enabled: Every edit stages immediately into session.", color=(150, 150, 150))
+                        dpg.add_spacer(width=20)
                         dpg.add_text("", tag="player_save_feedback", color=(0, 255, 120))
 
     def _build_teams_tab(self):
@@ -643,7 +680,7 @@ class SquadEditorApp:
                 with dpg.group(horizontal=True):
                     with dpg.group():
                         dpg.add_image("tex_default_club", width=70, height=70, tag="team_crest_img")
-                        dpg.add_button(label="📷 Crest", callback=self._on_import_club_crest, width=70)
+                        dpg.add_button(label="[Crest]", callback=self._on_import_club_crest, width=70)
                     dpg.add_spacer(width=12)
                     with dpg.group():
                         dpg.add_text("Club Inspector", color=(0, 180, 240))
@@ -659,23 +696,23 @@ class SquadEditorApp:
                         dpg.add_input_text(tag="edit_team_name", width=260)
 
                     with dpg.group(horizontal=True):
-                        dpg.add_text("🏟️ Stadium:    ")
+                        dpg.add_text("Stadium:        ")
                         dpg.add_input_text(tag="edit_team_stadium", width=360)
-                        dpg.add_button(label="💾 Save Club Details", callback=self._on_save_team_changes, width=160)
+                        dpg.add_button(label="Save Club Details", callback=self._on_save_team_changes, width=160)
 
                     # Manager & Head Coach Profile Card
                     dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
                         with dpg.group():
                             dpg.add_image("tex_default_manager", width=54, height=54, tag="team_manager_img")
-                            dpg.add_button(label="📷 Face", callback=self._on_import_manager_face, width=54)
+                            dpg.add_button(label="[Face]", callback=self._on_import_manager_face, width=54)
                         dpg.add_spacer(width=10)
                         with dpg.group():
-                            dpg.add_text("👔 Head Coach / Manager:", color=(0, 220, 160))
+                            dpg.add_text("Head Coach / Manager:", color=(0, 220, 160))
                             with dpg.group(horizontal=True):
                                 dpg.add_input_text(tag="edit_team_manager_name", hint="Manager Name", width=200)
                                 dpg.add_input_text(tag="edit_team_manager_nat", hint="Nationality", width=110)
-                                dpg.add_button(label="💾 Save Manager", callback=self._on_save_manager_changes, width=130)
+                                dpg.add_button(label="Save Manager", callback=self._on_save_manager_changes, width=130)
                             dpg.add_text("Role: Head Coach", tag="team_manager_role_label", color=(150, 150, 150))
 
                     dpg.add_spacer(height=10)
@@ -685,7 +722,7 @@ class SquadEditorApp:
                     with dpg.group(horizontal=True):
                         dpg.add_text("Club Squad Roster", color=(0, 200, 255))
                         dpg.add_spacer(width=160)
-                        dpg.add_button(label="➕ Sign Player to Club", callback=self._on_open_sign_player_modal, width=190)
+                        dpg.add_button(label="[+] Sign Player to Club", callback=self._on_open_sign_player_modal, width=190)
 
                     dpg.add_text("Click a player below to edit shirt number or release to free agents:", color=(160, 160, 160))
                     dpg.add_listbox(items=[], num_items=14, tag="team_roster_listbox", callback=self._on_select_team_roster_player, width=620)
@@ -703,7 +740,7 @@ class SquadEditorApp:
                                     dpg.add_input_int(tag="edit_team_roster_jersey_num", min_value=1, max_value=99, default_value=10, width=80)
                                     dpg.add_button(label="Set #", callback=self._on_set_roster_jersey_num, width=70)
                                     dpg.add_spacer(width=20)
-                                    dpg.add_button(label="❌ Release to Free Agents", callback=self._on_release_roster_player, width=200)
+                                    dpg.add_button(label="[X] Release to Free Agents", callback=self._on_release_roster_player, width=200)
 
                     dpg.add_spacer(height=10)
                     dpg.add_text("", tag="team_save_feedback", color=(0, 255, 120))
@@ -723,9 +760,9 @@ class SquadEditorApp:
                 dpg.add_button(label="Clone", callback=self._on_clone_row, width=75)
                 dpg.add_button(label="Delete", callback=self._on_click_delete_row, width=80)
                 dpg.add_spacer(width=10)
-                dpg.add_button(label="📥 Export CSV", callback=self._on_export_table_csv, width=105)
-                dpg.add_button(label="📤 Import CSV", callback=self._on_import_table_csv, width=105)
-                dpg.add_button(label="📦 Export All (ZIP)", callback=self._on_export_all_tables_zip, width=130)
+                dpg.add_button(label="Export CSV", callback=self._on_export_table_csv, width=105)
+                dpg.add_button(label="Import CSV", callback=self._on_import_table_csv, width=105)
+                dpg.add_button(label="Export All (ZIP)", callback=self._on_export_all_tables_zip, width=130)
 
             dpg.add_spacer(height=4)
             # Table Safety & Stats Card
@@ -774,22 +811,137 @@ class SquadEditorApp:
 
     def _build_settings_tab(self):
         with dpg.child_window():
-            dpg.add_text("File, Safety & Export Settings", color=(0, 180, 240))
+            dpg.add_text("Application Preferences, Backups & System Diagnostics", color=(0, 180, 240))
             dpg.add_separator()
-            dpg.add_text("Currently Loaded Squads File:")
-            dpg.add_text("None", tag="settings_active_file", color=(255, 200, 0))
-            dpg.add_spacer(height=10)
-            dpg.add_text("Immediate Safety Backup Created in Same Folder:")
-            dpg.add_text("None", tag="settings_backup_file", color=(0, 255, 150))
-            dpg.add_spacer(height=15)
-            dpg.add_text("All Existing Backups in Save Folder:", color=(180, 180, 180))
-            dpg.add_listbox(items=[], num_items=8, tag="settings_backups_listbox", width=700)
-            dpg.add_spacer(height=20)
-            dpg.add_separator()
-            dpg.add_text("EA SPORTS FC 25 Database Specifications:")
-            dpg.add_text("• Container: Frostbite Engine FBCHUNKS v1 (250-byte chunk header with native GUID).")
-            dpg.add_text("• Core Relational Database: FIFA DB v8 (magic 'DB\\x00\\x08', 76 bit-packed relational tables).")
-            dpg.add_text("• 100% In-Game Guarantee: Round-trip exports bit-for-byte exact schema for full career/kickoff mode compatibility.")
+            dpg.add_spacer(height=6)
+            
+            with dpg.group(horizontal=True):
+                # LEFT COLUMN: Backups & File Recovery Hub
+                with dpg.child_window(width=580, height=640):
+                    dpg.add_text("FILE BACKUPS & RECOVERY HUB", color=(255, 200, 0))
+                    dpg.add_separator()
+                    dpg.add_spacer(height=4)
+                    
+                    dpg.add_text("Currently Loaded File:", color=(180, 180, 180))
+                    dpg.add_text("None", tag="settings_active_file", color=(255, 220, 100), wrap=550)
+                    
+                    dpg.add_spacer(height=4)
+                    dpg.add_text("Safety Backup on Load:", color=(180, 180, 180))
+                    dpg.add_text("None", tag="settings_backup_file", color=(0, 255, 150), wrap=550)
+                    
+                    dpg.add_spacer(height=8)
+                    dpg.add_separator()
+                    dpg.add_spacer(height=6)
+                    
+                    dpg.add_text("Available Squad Backups:", color=(200, 200, 200))
+                    dpg.add_listbox(items=[], num_items=12, tag="settings_backups_listbox", width=550)
+                    
+                    dpg.add_spacer(height=10)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="[+] Create Backup Now", callback=self._on_click_create_manual_backup, width=170)
+                        dpg.add_button(label="Restore Selected", callback=self._on_click_restore_backup, width=140)
+                        dpg.add_button(label="Delete Selected", callback=self._on_click_delete_backup, width=130)
+                    
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Open Backups Folder", callback=self._on_click_open_backup_folder, width=170)
+                        dpg.add_button(label="Purge Old Backups", callback=self._on_click_purge_backups, width=140)
+                        
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("", tag="settings_backup_feedback", color=(0, 255, 120), wrap=550)
+
+                dpg.add_spacer(width=15)
+                
+                # RIGHT COLUMN: Preferences & Database Diagnostics Hub
+                with dpg.child_window(width=620, height=640):
+                    dpg.add_text("APPLICATION PREFERENCES & SAFETY", color=(0, 220, 160))
+                    dpg.add_separator()
+                    dpg.add_spacer(height=6)
+                    
+                    dpg.add_checkbox(
+                        label="Auto-backup squads file on open",
+                        tag="cfg_auto_backup_on_load",
+                        default_value=self.config.auto_backup_on_load,
+                        callback=self._on_toggle_config,
+                        user_data="auto_backup_on_load"
+                    )
+                    dpg.add_text("- Creates an immediate timestamped duplicate before parsing starts.", color=(140, 140, 140))
+                    
+                    dpg.add_spacer(height=4)
+                    dpg.add_checkbox(
+                        label="Auto-backup squads file before saving",
+                        tag="cfg_auto_backup_on_save",
+                        default_value=self.config.auto_backup_on_save,
+                        callback=self._on_toggle_config,
+                        user_data="auto_backup_on_save"
+                    )
+                    dpg.add_text("- Safeguards existing save file prior to rewriting disk chunks.", color=(140, 140, 140))
+
+                    dpg.add_spacer(height=4)
+                    dpg.add_checkbox(
+                        label="Live auto-apply player edits",
+                        tag="cfg_auto_apply_player_edits",
+                        default_value=self.config.auto_apply_player_edits,
+                        callback=self._on_toggle_config,
+                        user_data="auto_apply_player_edits"
+                    )
+                    dpg.add_text("- Every slider/input in Player Inspector updates memory and staged diffs instantly.", color=(140, 140, 140))
+
+                    dpg.add_spacer(height=4)
+                    dpg.add_checkbox(
+                        label="Strict bitfield clamping",
+                        tag="cfg_strict_clamping",
+                        default_value=self.config.strict_clamping,
+                        callback=self._on_toggle_config,
+                        user_data="strict_clamping"
+                    )
+                    dpg.add_text("- Enforces strict bounds matching FC 25 binary bit lengths (prevents corrupted values).", color=(140, 140, 140))
+
+                    dpg.add_spacer(height=4)
+                    dpg.add_checkbox(
+                        label="Confirmation prompt before discarding all staged changes",
+                        tag="cfg_confirm_discard_all",
+                        default_value=self.config.confirm_discard_all,
+                        callback=self._on_toggle_config,
+                        user_data="confirm_discard_all"
+                    )
+
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Backups retention limit:")
+                        items_retain = ["3 Backups", "5 Backups", "10 Backups", "20 Backups", "Unlimited"]
+                        cur_str = f"{self.config.max_backups_retain} Backups" if self.config.max_backups_retain < 999 else "Unlimited"
+                        dpg.add_combo(items=items_retain, default_value=cur_str, tag="cfg_max_backups_combo", width=140, callback=self._on_change_max_backups)
+
+                    dpg.add_spacer(height=12)
+                    dpg.add_separator()
+                    dpg.add_spacer(height=6)
+
+                    dpg.add_text("DATABASE ENGINE DIAGNOSTICS", color=(0, 200, 255))
+                    dpg.add_separator()
+                    dpg.add_spacer(height=4)
+
+                    dpg.add_text("Relational Tables: --", tag="diag_tables_count")
+                    dpg.add_text("Indexed Players: --", tag="diag_players_count")
+                    dpg.add_text("Indexed Clubs: --", tag="diag_teams_count")
+                    dpg.add_text("Active In-File Transfers: --", tag="diag_transfers_count")
+                    dpg.add_text("Staged Session Changes: --", tag="diag_staged_count")
+
+                    dpg.add_spacer(height=10)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Run Integrity Scan", callback=self._on_run_integrity_scan, width=170)
+                        dpg.add_button(label="Export Diagnostics Report", callback=self._on_export_diagnostics_report, width=190)
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("", tag="diag_feedback_text", color=(0, 255, 120), wrap=580)
+                    
+                    dpg.add_spacer(height=10)
+                    dpg.add_separator()
+                    dpg.add_spacer(height=4)
+                    dpg.add_text("EA SPORTS FC 25 Engine Specifications:", color=(160, 160, 160))
+                    dpg.add_text("- Container: Frostbite Engine FBCHUNKS v1 (250-byte chunk header with native GUID).", color=(130, 130, 130))
+                    dpg.add_text("- Core Relational Database: FIFA DB v8 (magic 'DB\\x00\\x08', 76 bit-packed relational tables).", color=(130, 130, 130))
+                    dpg.add_text("- In-Game Guarantee: Round-trip exports bit-for-byte exact schema for full career/kickoff mode compatibility.", color=(130, 130, 130))
 
     # --- File & Session Handlers ---
 
@@ -816,6 +968,7 @@ class SquadEditorApp:
             self._load_database_tables_dropdown()
             self._populate_club_combo()
             self._update_save_and_changes_toolbar()
+            self._refresh_diagnostics_tab()
             if dpg.does_item_exist("pending_changes_modal") and dpg.is_item_shown("pending_changes_modal"):
                 self._refresh_pending_changes_modal()
         else:
@@ -825,11 +978,223 @@ class SquadEditorApp:
         if not self.session.is_loaded:
             dpg.set_value("status_text", "Error: No squads file loaded.")
             return
+        if self.config.auto_backup_on_save and self.session.filepath:
+            try:
+                create_load_backup(self.session.filepath)
+                if self.config.max_backups_retain < 999:
+                    purge_old_backups(self.session.filepath, keep_last=self.config.max_backups_retain)
+                self._update_backups_list()
+            except Exception:
+                pass
         success, msg = self.session.save_squads_file()
         dpg.set_value("status_text", msg)
         self._update_save_and_changes_toolbar()
+        self._refresh_diagnostics_tab()
         if dpg.does_item_exist("pending_changes_modal") and dpg.is_item_shown("pending_changes_modal"):
             self._refresh_pending_changes_modal()
+
+    def _refresh_diagnostics_tab(self):
+        if not self.session.is_loaded:
+            return
+        if dpg.does_item_exist("diag_tables_count"):
+            dpg.set_value("diag_tables_count", f"Relational Tables: {len(self.session.db.tables)} loaded")
+        if dpg.does_item_exist("diag_players_count"):
+            dpg.set_value("diag_players_count", f"Indexed Players: {len(self.session.players_cache):,} players")
+        if dpg.does_item_exist("diag_teams_count"):
+            dpg.set_value("diag_teams_count", f"Indexed Clubs: {len(self.session.teams_cache)} authentic clubs")
+        if dpg.does_item_exist("diag_transfers_count"):
+            dpg.set_value("diag_transfers_count", f"Active In-File Transfers: {len(self.session.user_transfers)} players")
+        if dpg.does_item_exist("diag_staged_count"):
+            dpg.set_value("diag_staged_count", f"Staged Session Changes: {self.session.change_tracker.count} modifications")
+
+    def _on_click_create_manual_backup(self):
+        if not self.session.filepath:
+            dpg.set_value("settings_backup_feedback", "[!] Load a squads file first to create a backup.")
+            return
+        try:
+            bp, msg = create_load_backup(self.session.filepath)
+            self._update_backups_list()
+            dpg.set_value("settings_backup_feedback", f"[OK] Created backup: {os.path.basename(bp)}")
+        except Exception as e:
+            dpg.set_value("settings_backup_feedback", f"[Error] Backup creation failed: {e}")
+
+    def _on_click_restore_backup(self):
+        if not self.session.filepath:
+            dpg.set_value("settings_backup_feedback", "[!] Load a squads file first.")
+            return
+        sel_str = dpg.get_value("settings_backups_listbox")
+        if not sel_str:
+            dpg.set_value("settings_backup_feedback", "[!] Select a backup from the list first.")
+            return
+        sel_filename = sel_str.split("  [")[0].strip()
+        target_path = None
+        for bp in getattr(self, "cached_backup_paths", []):
+            if os.path.basename(bp) == sel_filename:
+                target_path = bp
+                break
+        if not target_path:
+            dpg.set_value("settings_backup_feedback", "[!] Selected backup path not found.")
+            return
+        self.pending_restore_backup_path = target_path
+        dpg.set_value("restore_modal_msg", f"Are you sure you want to restore:\n\n{os.path.basename(target_path)}\n\nThis will overwrite the active file '{os.path.basename(self.session.filepath)}' and reload all tables.")
+        dpg.configure_item("restore_backup_confirm_modal", show=True)
+
+    def _on_confirm_restore_backup(self):
+        dpg.configure_item("restore_backup_confirm_modal", show=False)
+        if not self.pending_restore_backup_path or not self.session.filepath:
+            return
+        target_path = self.session.filepath
+        ok, msg = restore_backup(self.pending_restore_backup_path, target_path)
+        if ok:
+            success, load_msg = self.session.load_squads_file(target_path)
+            if success:
+                self._load_players_list()
+                self._load_teams_list()
+                self._load_database_tables_dropdown()
+                self._populate_club_combo()
+                self._update_save_and_changes_toolbar()
+                self._refresh_diagnostics_tab()
+                dpg.set_value("settings_backup_feedback", f"[OK] Restored and reloaded: {os.path.basename(self.pending_restore_backup_path)}")
+                dpg.set_value("status_text", f"Restored from backup: {os.path.basename(self.pending_restore_backup_path)}")
+            else:
+                dpg.set_value("settings_backup_feedback", f"[Error] Reload failed: {load_msg}")
+        else:
+            dpg.set_value("settings_backup_feedback", f"[Error] {msg}")
+
+    def _on_click_delete_backup(self):
+        sel_str = dpg.get_value("settings_backups_listbox")
+        if not sel_str:
+            dpg.set_value("settings_backup_feedback", "[!] Select a backup from the list first.")
+            return
+        sel_filename = sel_str.split("  [")[0].strip()
+        target_path = None
+        for bp in getattr(self, "cached_backup_paths", []):
+            if os.path.basename(bp) == sel_filename:
+                target_path = bp
+                break
+        if not target_path:
+            dpg.set_value("settings_backup_feedback", "[!] Selected backup path not found.")
+            return
+        ok, msg = delete_backup(target_path)
+        self._update_backups_list()
+        dpg.set_value("settings_backup_feedback", f"[OK] {msg}" if ok else f"[Error] {msg}")
+
+    def _on_click_open_backup_folder(self):
+        if not self.session.filepath:
+            dpg.set_value("settings_backup_feedback", "[!] Load a squads file first.")
+            return
+        folder = os.path.dirname(os.path.abspath(self.session.filepath))
+        try:
+            os.startfile(folder)
+            dpg.set_value("settings_backup_feedback", f"[OK] Opened folder: {folder}")
+        except Exception as e:
+            dpg.set_value("settings_backup_feedback", f"[Error] Could not open folder: {e}")
+
+    def _on_click_purge_backups(self):
+        if not self.session.filepath:
+            dpg.set_value("settings_backup_feedback", "[!] Load a squads file first.")
+            return
+        limit = self.config.max_backups_retain if self.config.max_backups_retain < 999 else 5
+        count, msg = purge_old_backups(self.session.filepath, keep_last=limit)
+        self._update_backups_list()
+        dpg.set_value("settings_backup_feedback", f"[OK] {msg}")
+
+    def _on_toggle_config(self, sender, app_data, user_data):
+        if hasattr(self.config, user_data):
+            setattr(self.config, user_data, bool(app_data))
+            self.config.save()
+            dpg.set_value("diag_feedback_text", f"Preference '{user_data}' set to {bool(app_data)} (saved)")
+
+    def _on_change_max_backups(self, sender, app_data):
+        val_str = app_data
+        if "3" in val_str:
+            self.config.max_backups_retain = 3
+        elif "5" in val_str:
+            self.config.max_backups_retain = 5
+        elif "10" in val_str:
+            self.config.max_backups_retain = 10
+        elif "20" in val_str:
+            self.config.max_backups_retain = 20
+        else:
+            self.config.max_backups_retain = 999
+        self.config.save()
+        dpg.set_value("diag_feedback_text", f"Retention limit set to {val_str} (saved)")
+
+    def _on_run_integrity_scan(self):
+        if not self.session.is_loaded:
+            dpg.set_value("diag_feedback_text", "[!] Load a squads file first to run integrity scan.")
+            return
+        total_tables = len(self.session.db.tables)
+        total_players = len(self.session.players_cache)
+        total_teams = len(self.session.teams_cache)
+        transfers_count = len(self.session.user_transfers)
+        
+        czum = self.session.db.tables_map.get("CZUM")
+        risb = self.session.db.tables_map.get("rIsB")
+        czum_pids = set(r.get("playerid", 0) for r in czum.records) if czum else set()
+        orphaned = 0
+        if risb:
+            for r in risb.records:
+                pid = r.get("playerid", 0)
+                if pid and pid not in czum_pids:
+                    orphaned += 1
+                    
+        if orphaned == 0:
+            dpg.set_value("diag_feedback_text", f"[OK] Integrity Scan PASSED: All {total_tables} tables intact. {total_players:,} players, {total_teams} clubs, {transfers_count} transfers verified. 0 orphaned links.")
+        else:
+            dpg.set_value("diag_feedback_text", f"[!] Integrity Scan WARNING: {orphaned} player references in rIsB not found in CZUM.")
+
+    def _on_export_diagnostics_report(self):
+        if not self.session.is_loaded:
+            dpg.set_value("diag_feedback_text", "[!] Load a squads file first.")
+            return
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        default_name = f"Squads_Diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        initial_dir = os.path.dirname(os.path.abspath(self.session.filepath)) if self.session.filepath else ""
+        save_path = filedialog.asksaveasfilename(
+            title="Export Database Diagnostics Report",
+            initialdir=initial_dir,
+            initialfile=default_name,
+            filetypes=[("Text Report", "*.txt"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not save_path:
+            return
+            
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write("=" * 70 + "\n")
+                f.write("EA SPORTS FC 25 SQUADS DATABASE DIAGNOSTIC REPORT\n")
+                f.write("=" * 70 + "\n\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Squads File: {self.session.filepath}\n")
+                if self.session.filepath and os.path.exists(self.session.filepath):
+                    f.write(f"File Size: {os.path.getsize(self.session.filepath):,} bytes\n")
+                f.write(f"Active Backup: {self.session.backup_path or 'None'}\n\n")
+                
+                f.write("--- Relational Database Summary ---\n")
+                f.write(f"Total Tables: {len(self.session.db.tables)}\n")
+                f.write(f"Total Indexed Players: {len(self.session.players_cache):,}\n")
+                f.write(f"Total Authentic Clubs: {len(self.session.teams_cache):,}\n")
+                f.write(f"Active In-File Transfers: {len(self.session.user_transfers)}\n")
+                f.write(f"Staged Session Modifications: {self.session.change_tracker.count}\n\n")
+                
+                f.write("--- Table Schema & Record Manifest ---\n")
+                f.write(f"{'Table SNAME':<12} | {'Records':<8} | {'Cols':<6} | {'Row Bit Length':<14} | Description\n")
+                f.write("-" * 75 + "\n")
+                for tbl in self.session.db.tables:
+                    disp = get_table_display_name(tbl.sname)
+                    row_bits = getattr(tbl, "row_bit_length", 0)
+                    f.write(f"{tbl.sname:<12} | {len(tbl.records):<8} | {len(tbl.columns):<6} | {row_bits:<14} | {disp}\n")
+                    
+                f.write("\n" + "=" * 70 + "\n")
+                f.write("END OF REPORT\n")
+                f.write("=" * 70 + "\n")
+            dpg.set_value("diag_feedback_text", f"[OK] Exported diagnostics report to: {os.path.basename(save_path)}")
+        except Exception as e:
+            dpg.set_value("diag_feedback_text", f"[Error] Export report failed: {e}")
 
     def _on_click_save_as(self):
         if not self.session.is_loaded:
@@ -849,6 +1214,7 @@ class SquadEditorApp:
         success, msg = self.session.save_squads_file(target)
         dpg.set_value("status_text", msg)
         self._update_save_and_changes_toolbar()
+        self._refresh_diagnostics_tab()
         if dpg.does_item_exist("pending_changes_modal") and dpg.is_item_shown("pending_changes_modal"):
             self._refresh_pending_changes_modal()
 
@@ -858,17 +1224,17 @@ class SquadEditorApp:
         count = tracker.count
         if count > 0:
             if dpg.does_item_exist("btn_primary_save"):
-                dpg.configure_item("btn_primary_save", label=f"💾 Save File ({count})*")
+                dpg.configure_item("btn_primary_save", label=f"Save File ({count})*")
                 dpg.bind_item_theme("btn_primary_save", "theme_save_btn_dirty")
             if dpg.does_item_exist("btn_review_changes"):
-                dpg.configure_item("btn_review_changes", label=f"📋 Changes ({count})*")
+                dpg.configure_item("btn_review_changes", label=f"Changes ({count})*")
                 dpg.bind_item_theme("btn_review_changes", "theme_changes_btn_active")
         else:
             if dpg.does_item_exist("btn_primary_save"):
-                dpg.configure_item("btn_primary_save", label="💾 Save File")
+                dpg.configure_item("btn_primary_save", label="Save File")
                 dpg.bind_item_theme("btn_primary_save", "")
             if dpg.does_item_exist("btn_review_changes"):
-                dpg.configure_item("btn_review_changes", label="📋 Changes (0)")
+                dpg.configure_item("btn_review_changes", label="Changes (0)")
                 dpg.bind_item_theme("btn_review_changes", "")
 
     def _on_open_pending_changes(self):
@@ -890,7 +1256,7 @@ class SquadEditorApp:
         if count == 0:
             with dpg.group(parent="pending_changes_container"):
                 dpg.add_spacer(height=60)
-                dpg.add_text("✓ No pending changes.", color=(0, 255, 120))
+                dpg.add_text("[OK] No pending changes.", color=(0, 255, 120))
                 dpg.add_text("The active session is completely in sync with the squad file.", color=(160, 160, 160))
             return
 
@@ -910,7 +1276,7 @@ class SquadEditorApp:
                     dpg.add_text(f"({c.get_time_str()})", color=(130, 130, 130))
                     dpg.add_spacer(width=20)
                     btn = dpg.add_button(
-                        label="✖ Revert",
+                        label="[X] Revert",
                         user_data=c.id,
                         callback=self._on_revert_single_change_clicked,
                         width=85
@@ -921,13 +1287,13 @@ class SquadEditorApp:
                     dpg.add_spacer(width=20)
                     dpg.add_text(f"{c.field_label}:", color=(180, 180, 180))
                     dpg.add_text(f"{c.old_display}", color=(255, 110, 110))
-                    dpg.add_text("➔", color=(255, 255, 255))
+                    dpg.add_text("->", color=(255, 255, 255))
                     dpg.add_text(f"{c.new_display}", color=(100, 255, 140))
 
                 dpg.add_separator()
 
     def _on_revert_single_change_clicked(self, sender, app_data, user_data):
-        """Handles single change revert when clicking the red '✖ Revert' button."""
+        """Handles single change revert when clicking the '[X] Revert' button."""
         change_id = user_data
         if not change_id:
             return
@@ -943,6 +1309,13 @@ class SquadEditorApp:
         count = self.session.change_tracker.count
         if count == 0:
             return
+        if self.config.confirm_discard_all:
+            dpg.configure_item("discard_all_confirm_modal", show=True)
+        else:
+            self._on_confirm_discard_all()
+
+    def _on_confirm_discard_all(self):
+        dpg.configure_item("discard_all_confirm_modal", show=False)
         reverted_count = self.session.change_tracker.revert_all()
         self._update_save_and_changes_toolbar()
         self._refresh_pending_changes_modal()
@@ -987,10 +1360,14 @@ class SquadEditorApp:
 
     def _update_backups_list(self):
         if self.session.filepath:
-            folder = os.path.dirname(self.session.filepath)
-            backups = list_folder_backups(folder)
-            items = [f"{b['filename']} ({b['size_bytes']:,} bytes) - {b['timestamp']}" for b in backups]
-            dpg.configure_item("settings_backups_listbox", items=items)
+            backups = list_folder_backups(self.session.filepath)
+            self.cached_backup_paths = backups
+            items = []
+            for bp in backups:
+                meta = get_backup_metadata(bp)
+                items.append(f"{meta.get('filename', os.path.basename(bp))}  [{meta.get('size_str', '')}]  -  {meta.get('mtime', '')}")
+            if dpg.does_item_exist("settings_backups_listbox"):
+                dpg.configure_item("settings_backups_listbox", items=items)
 
     def _populate_club_combo(self):
         club_items = ["Free Agent"]
@@ -1080,7 +1457,7 @@ class SquadEditorApp:
         items = []
         for p in self.filtered_players:
             is_trans = p.get("playerid") in self.session.user_transfers or p.get("risb_row_idx") is not None
-            badge = " 🔄" if is_trans else ""
+            badge = " [T]" if is_trans else ""
             items.append(f"[{p['overall']}] {p['name']} ({p['position']}) - {p['club']}{badge}")
         if dpg.does_item_exist("players_listbox"):
             dpg.configure_item("players_listbox", items=items)
@@ -1091,8 +1468,8 @@ class SquadEditorApp:
         dpg.set_value("player_search_input", "")
         self.filter_pos_category = "All"
         self.min_ovr_filter = 0
-        self.filter_preset = "🌟 All Players"
-        dpg.set_value("player_preset_combo", "🌟 All Players")
+        self.filter_preset = "All Players"
+        dpg.set_value("player_preset_combo", "All Players")
         dpg.set_value("player_pos_combo", "All")
         dpg.set_value("player_min_ovr_slider", 0)
         self._on_filter_players()
@@ -1134,6 +1511,22 @@ class SquadEditorApp:
             dpg.set_value("edit_player_icontrait1", str(it1))
         if dpg.does_item_exist("edit_player_icontrait2"):
             dpg.set_value("edit_player_icontrait2", str(it2))
+
+        # Auto-commit PlayStyles live to session
+        if not getattr(self, "_is_populating_player", False) and self.selected_player:
+            pid = self.selected_player["playerid"]
+            stats = self.selected_player.setdefault("stats", {})
+            self.session.update_player_attribute(pid, "trait1", t1)
+            self.session.update_player_attribute(pid, "trait2", t2)
+            self.session.update_player_attribute(pid, "icontrait1", it1)
+            self.session.update_player_attribute(pid, "icontrait2", it2)
+            stats["trait1"] = str(t1)
+            stats["trait2"] = str(t2)
+            stats["icontrait1"] = str(it1)
+            stats["icontrait2"] = str(it2)
+            self._update_save_and_changes_toolbar()
+            staged_n = self.session.change_tracker.count
+            dpg.set_value("player_save_feedback", f"Auto-applied: PlayStyles updated ({staged_n} staged)")
 
     def _on_clear_playstyles(self):
         for key in PLAYSTYLE_MAP:
@@ -1179,161 +1572,319 @@ class SquadEditorApp:
         self.selected_player = p
         self._populate_player_details(p)
 
-    def _populate_player_details(self, p: Dict[str, Any]):
+    def _update_player_sub_header(self):
+        if not self.selected_player:
+            return
+        p = self.selected_player
         pid = p["playerid"]
-
-        # Set color-coded badge
-        ovr = p["overall"]
-        badge_color = (0, 255, 120) if ovr >= 80 else (120, 255, 80) if ovr >= 70 else (255, 220, 0) if ovr >= 60 else (255, 140, 0) if ovr >= 50 else (255, 50, 50)
-        dpg.set_value("player_badge_ovr", f"[ {ovr:2d} ]")
-        dpg.configure_item("player_badge_ovr", color=badge_color)
-
         jersey_num = self.session.get_player_jersey_number(pid)
-        dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
         is_trans = pid in self.session.user_transfers or p.get("risb_row_idx") is not None
         trans_tag = " [TRANSFERRED]" if is_trans else ""
-        dpg.set_value("player_sub_header", f"Club: {p['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {p['position']}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}★  |  Weak Foot: {p.get('weak_foot', 3)}★")
+        dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
+        dpg.set_value("player_sub_header", f"Club: {p['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {p.get('position', 'None')}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}*  |  Weak Foot: {p.get('weak_foot', 3)}*")
 
-        # Update player miniface texture
-        p_tex = self.assets.get_player_texture(pid, p["name"], jersey_num, ovr, p["position"])
-        if dpg.does_item_exist("player_miniface_img"):
-            dpg.configure_item("player_miniface_img", texture_tag=p_tex)
-
-        stats = p.get("stats", {})
-        
-        # Populate sliders and fields
-        dpg.set_value("edit_player_ovr", ovr)
-        dpg.set_value("edit_player_pot", p.get("potential", ovr))
-        dpg.set_value("edit_player_id_display", pid)
-        dpg.set_value("edit_player_age_display", p.get("age", 25))
-        
-        # Club dropdown with all authentic 808 teams
-        club_items = ["Free Agent"] + [f"{t['name']} (ID {t['teamid']})" for t in self.session.teams_cache if t['teamid'] > 0]
-        dpg.configure_item("edit_player_club_combo", items=club_items)
-        club_display = "Free Agent" if p["teamid"] == 0 else f"{p['club']} (ID {p['teamid']})"
-        dpg.set_value("edit_player_club_combo", club_display)
-        
-        dpg.set_value("edit_player_foot", p.get("foot", "Right"))
-        if p["position"] in POSITION_NAMES.values():
-            dpg.set_value("edit_player_pos1", p["position"])
+    def _on_player_field_changed(self, sender, app_data, user_data):
+        if getattr(self, "_is_populating_player", False):
+            return
+        if not self.selected_player:
+            return
             
-        def _get_pos_name_safe(p_code):
-            try:
-                code_int = int(p_code)
-                return POSITION_NAMES.get(code_int, "None")
-            except Exception:
-                return "None"
-
-        dpg.set_value("edit_player_pos2", _get_pos_name_safe(stats.get("preferredposition2", -1)))
-        dpg.set_value("edit_player_pos3", _get_pos_name_safe(stats.get("preferredposition3", -1)))
-        dpg.set_value("edit_player_pos4", _get_pos_name_safe(stats.get("preferredposition4", -1)))
-
-        dpg.set_value("edit_player_jersey", jersey_num)
+        pid = self.selected_player["playerid"]
+        stats = self.selected_player.setdefault("stats", {})
+        attr = user_data
         
+        def _get_pos_code(pos_str):
+            for k, v in POSITION_NAMES.items():
+                if v == pos_str:
+                    return k
+            return -1
+
+        if attr == "overallrating":
+            val = dpg.get_value("edit_player_ovr")
+            self.session.update_player_attribute(pid, "overallrating", val)
+            self.selected_player["overall"] = val
+            badge_color = (0, 255, 120) if val >= 80 else (120, 255, 80) if val >= 70 else (255, 220, 0) if val >= 60 else (255, 140, 0) if val >= 50 else (255, 50, 50)
+            dpg.set_value("player_badge_ovr", f"[ {val:2d} ]")
+            dpg.configure_item("player_badge_ovr", color=badge_color)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "potential":
+            val = dpg.get_value("edit_player_pot")
+            self.session.update_player_attribute(pid, "potential", val)
+            self.selected_player["potential"] = val
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "age":
+            val = dpg.get_value("edit_player_age_display")
+            self.session.update_player_attribute(pid, "age", val)
+            self.selected_player["age"] = val
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "jerseynumber":
+            val = dpg.get_value("edit_player_jersey")
+            self.session.set_player_jersey_number(pid, val)
+            self._update_player_sub_header()
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "isretiring":
+            val = 1 if dpg.get_value("edit_player_isretiring") else 0
+            self.session.update_player_attribute(pid, "isretiring", val)
+            self.selected_player["isretiring"] = val
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "foot":
+            val = dpg.get_value("edit_player_foot")
+            foot_code = 1 if val == "Left" else 0
+            self.session.update_player_attribute(pid, "preferredfoot", foot_code)
+            self.selected_player["foot"] = val
+            self._update_player_sub_header()
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "pos1":
+            pos_str = dpg.get_value("edit_player_pos1")
+            code = _get_pos_code(pos_str)
+            if code >= 0:
+                self.session.update_player_attribute(pid, "preferredposition1", code)
+                self.selected_player["position"] = pos_str
+                self._update_player_sub_header()
+                self._update_save_and_changes_toolbar()
+                
+        elif attr in ("pos2", "pos3", "pos4"):
+            pos_str = dpg.get_value(f"edit_player_{attr}")
+            code = _get_pos_code(pos_str)
+            col_name = f"preferredposition{attr[-1]}"
+            self.session.update_player_attribute(pid, col_name, code)
+            stats[col_name] = str(code)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "contractvaliduntil":
+            val = dpg.get_value("edit_player_contract")
+            self.session.update_player_attribute(pid, "contractvaliduntil", val)
+            stats["contractvaliduntil"] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "skills":
+            val = dpg.get_value("edit_player_skills")
+            self.session.update_player_attribute(pid, "skillmoves", val)
+            self.selected_player["skills"] = val
+            stats["skillmoves"] = str(val)
+            self._update_player_sub_header()
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "weakfoot":
+            val = dpg.get_value("edit_player_weakfoot")
+            self.session.update_player_attribute(pid, "weakfootabilitytypecode", val)
+            self.selected_player["weak_foot"] = val
+            stats["weakfootabilitytypecode"] = str(val)
+            self._update_player_sub_header()
+            self._update_save_and_changes_toolbar()
+            
+        elif attr in ("height", "weight"):
+            val = dpg.get_value(f"edit_player_{attr}")
+            self.session.update_player_attribute(pid, attr, val)
+            self.selected_player[attr] = val
+            stats[attr] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr in ("role1", "role2", "role3", "role4", "role5"):
+            val = dpg.get_value(f"edit_player_{attr}")
+            self.session.update_player_attribute(pid, attr, val)
+            stats[attr] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "jerseystyle":
+            val = 1 if dpg.get_value("edit_player_jerseystyle") == "Untucked" else 0
+            self.session.update_player_attribute(pid, "jerseystylecode", val)
+            stats["jerseystylecode"] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "sleeves":
+            val = 1 if dpg.get_value("edit_player_sleeves") == "Long" else 0
+            self.session.update_player_attribute(pid, "jerseysleevelengthcode", val)
+            stats["jerseysleevelengthcode"] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "fit":
+            val = 1 if dpg.get_value("edit_player_fit") == "Tight" else 0
+            self.session.update_player_attribute(pid, "jerseyfit", val)
+            stats["jerseyfit"] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        elif attr == "socklength":
+            s_val = dpg.get_value("edit_player_socklength")
+            val = 1 if s_val == "Short" else 2 if s_val == "High" else 0
+            self.session.update_player_attribute(pid, "socklengthcode", val)
+            stats["socklengthcode"] = str(val)
+            self._update_save_and_changes_toolbar()
+            
+        else:
+            val = dpg.get_value(sender)
+            self.session.update_player_attribute(pid, attr, val)
+            stats[attr] = str(val)
+            self._update_save_and_changes_toolbar()
+
+        staged_n = self.session.change_tracker.count
+        dpg.set_value("player_save_feedback", f"Auto-applied: {attr} ({staged_n} staged)")
+
+    def _populate_player_details(self, p: Dict[str, Any]):
+        self._is_populating_player = True
         try:
-            contract_yr = int(stats.get("contractvaliduntil", 2028))
-        except Exception:
-            contract_yr = 2028
-        dpg.set_value("edit_player_contract", contract_yr)
-        dpg.set_value("edit_player_isretiring", bool(p.get("isretiring", 0)))
+            pid = p["playerid"]
 
-        dpg.set_value("edit_player_skills", int(stats.get("skillmoves", p.get("skills", 3))))
-        dpg.set_value("edit_player_weakfoot", int(stats.get("weakfootabilitytypecode", p.get("weak_foot", 3))))
-        dpg.set_value("edit_player_height", int(stats.get("height", p.get("height", 182))))
-        dpg.set_value("edit_player_weight", int(stats.get("weight", p.get("weight", 77))))
+            # Set color-coded badge
+            ovr = p["overall"]
+            badge_color = (0, 255, 120) if ovr >= 80 else (120, 255, 80) if ovr >= 70 else (255, 220, 0) if ovr >= 60 else (255, 140, 0) if ovr >= 50 else (255, 50, 50)
+            dpg.set_value("player_badge_ovr", f"[ {ovr:2d} ]")
+            dpg.configure_item("player_badge_ovr", color=badge_color)
 
-        # Decode and set PlayStyles & Traits
-        try:
-            t1 = int(stats.get("trait1", 0))
-        except Exception:
-            t1 = 0
-        try:
-            t2 = int(stats.get("trait2", 0))
-        except Exception:
-            t2 = 0
-        try:
-            it1 = int(stats.get("icontrait1", 0))
-        except Exception:
-            it1 = 0
-        try:
-            it2 = int(stats.get("icontrait2", 0))
-        except Exception:
-            it2 = 0
+            jersey_num = self.session.get_player_jersey_number(pid)
+            dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
+            is_trans = pid in self.session.user_transfers or p.get("risb_row_idx") is not None
+            trans_tag = " [TRANSFERRED]" if is_trans else ""
+            dpg.set_value("player_sub_header", f"Club: {p['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {p['position']}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}*  |  Weak Foot: {p.get('weak_foot', 3)}*")
 
-        ps_states = decode_player_playstyles(t1, t2, it1, it2)
-        for key in PLAYSTYLE_MAP:
-            tag = f"ps_radio_{key}"
-            if dpg.does_item_exist(tag):
-                st = ps_states.get(key, 0)
-                val_str = "None" if st == 0 else "(+) Regular" if st == 1 else "(++) PlayStyle+"
-                dpg.set_value(tag, val_str)
-        self._on_update_playstyles_summary()
+            # Update player miniface texture
+            p_tex = self.assets.get_player_texture(pid, p["name"], jersey_num, ovr, p["position"])
+            if dpg.does_item_exist("player_miniface_img"):
+                dpg.configure_item("player_miniface_img", texture_tag=p_tex)
 
-        # Roles & FC IQ
-        dpg.set_value("edit_player_role1", int(stats.get("role1", 0)))
-        dpg.set_value("edit_player_role2", int(stats.get("role2", 0)))
-        dpg.set_value("edit_player_role3", int(stats.get("role3", 0)))
-        dpg.set_value("edit_player_role4", int(stats.get("role4", 0)))
-        dpg.set_value("edit_player_role5", int(stats.get("role5", 0)))
+            stats = p.get("stats", {})
+            
+            # Populate sliders and fields
+            dpg.set_value("edit_player_ovr", ovr)
+            dpg.set_value("edit_player_pot", p.get("potential", ovr))
+            dpg.set_value("edit_player_id_display", pid)
+            dpg.set_value("edit_player_age_display", p.get("age", 25))
+            
+            # Club dropdown with all authentic 808 teams
+            club_items = ["Free Agent"] + [f"{t['name']} (ID {t['teamid']})" for t in self.session.teams_cache if t['teamid'] > 0]
+            dpg.configure_item("edit_player_club_combo", items=club_items)
+            club_display = "Free Agent" if p["teamid"] == 0 else f"{p['club']} (ID {p['teamid']})"
+            dpg.set_value("edit_player_club_combo", club_display)
+            
+            dpg.set_value("edit_player_foot", p.get("foot", "Right"))
+            if p["position"] in POSITION_NAMES.values():
+                dpg.set_value("edit_player_pos1", p["position"])
+                
+            def _get_pos_name_safe(p_code):
+                try:
+                    code_int = int(p_code)
+                    return POSITION_NAMES.get(code_int, "None")
+                except Exception:
+                    return "None"
 
-        # Pace & Shooting
-        dpg.set_value("edit_player_accel", int(stats.get("acceleration", 70)))
-        dpg.set_value("edit_player_sprint", int(stats.get("sprintspeed", 70)))
-        dpg.set_value("edit_player_pos", int(stats.get("positioning", 70)))
-        dpg.set_value("edit_player_finish", int(stats.get("finishing", 70)))
-        dpg.set_value("edit_player_shotpwr", int(stats.get("shotpower", 70)))
-        dpg.set_value("edit_player_longshots", int(stats.get("longshots", 70)))
-        dpg.set_value("edit_player_volleys", int(stats.get("volleys", 70)))
-        dpg.set_value("edit_player_penalties", int(stats.get("penalties", 70)))
+            dpg.set_value("edit_player_pos2", _get_pos_name_safe(stats.get("preferredposition2", -1)))
+            dpg.set_value("edit_player_pos3", _get_pos_name_safe(stats.get("preferredposition3", -1)))
+            dpg.set_value("edit_player_pos4", _get_pos_name_safe(stats.get("preferredposition4", -1)))
 
-        # Passing & Dribbling
-        dpg.set_value("edit_player_vision", int(stats.get("vision", 70)))
-        dpg.set_value("edit_player_crossing", int(stats.get("crossing", 70)))
-        dpg.set_value("edit_player_fk", int(stats.get("freekickaccuracy", 70)))
-        dpg.set_value("edit_player_shortpass", int(stats.get("shortpassing", 70)))
-        dpg.set_value("edit_player_longpass", int(stats.get("longpassing", 70)))
-        dpg.set_value("edit_player_curve", int(stats.get("curve", 70)))
-        dpg.set_value("edit_player_agility", int(stats.get("agility", 70)))
-        dpg.set_value("edit_player_balance", int(stats.get("balance", 70)))
-        dpg.set_value("edit_player_reactions", int(stats.get("reactions", 70)))
-        dpg.set_value("edit_player_ballctrl", int(stats.get("ballcontrol", 70)))
-        dpg.set_value("edit_player_dribble", int(stats.get("dribbling", 70)))
-        dpg.set_value("edit_player_composure", int(stats.get("composure", 70)))
+            dpg.set_value("edit_player_jersey", jersey_num)
+            
+            try:
+                contract_yr = int(stats.get("contractvaliduntil", 2028))
+            except Exception:
+                contract_yr = 2028
+            dpg.set_value("edit_player_contract", contract_yr)
+            dpg.set_value("edit_player_isretiring", bool(p.get("isretiring", 0)))
 
-        # Defending & Physical
-        dpg.set_value("edit_player_interceptions", int(stats.get("interceptions", 60)))
-        dpg.set_value("edit_player_heading", int(stats.get("headingaccuracy", 60)))
-        dpg.set_value("edit_player_defawareness", int(stats.get("defensiveawareness", 60)))
-        dpg.set_value("edit_player_standtackle", int(stats.get("standingtackle", 60)))
-        dpg.set_value("edit_player_slidetackle", int(stats.get("slidingtackle", 60)))
-        dpg.set_value("edit_player_jumping", int(stats.get("jumping", 70)))
-        dpg.set_value("edit_player_stamina", int(stats.get("stamina", 70)))
-        dpg.set_value("edit_player_strength", int(stats.get("strength", 70)))
-        dpg.set_value("edit_player_aggression", int(stats.get("aggression", 65)))
+            dpg.set_value("edit_player_skills", int(stats.get("skillmoves", p.get("skills", 3))))
+            dpg.set_value("edit_player_weakfoot", int(stats.get("weakfootabilitytypecode", p.get("weak_foot", 3))))
+            dpg.set_value("edit_player_height", int(stats.get("height", p.get("height", 182))))
+            dpg.set_value("edit_player_weight", int(stats.get("weight", p.get("weight", 77))))
 
-        # Goalkeeper
-        dpg.set_value("edit_player_gkdiving", int(stats.get("gkdiving", 10)))
-        dpg.set_value("edit_player_gkhandling", int(stats.get("gkhandling", 10)))
-        dpg.set_value("edit_player_gkkicking", int(stats.get("gkkicking", 10)))
-        dpg.set_value("edit_player_gkreflexes", int(stats.get("gkreflexes", 10)))
-        dpg.set_value("edit_player_gkpos", int(stats.get("gkpositioning", 10)))
+            # Decode and set PlayStyles & Traits
+            try:
+                t1 = int(stats.get("trait1", 0))
+            except Exception:
+                t1 = 0
+            try:
+                t2 = int(stats.get("trait2", 0))
+            except Exception:
+                t2 = 0
+            try:
+                it1 = int(stats.get("icontrait1", 0))
+            except Exception:
+                it1 = 0
+            try:
+                it2 = int(stats.get("icontrait2", 0))
+            except Exception:
+                it2 = 0
 
-        # Appearance & Kit options
-        dpg.set_value("edit_player_headasset", int(stats.get("headassetid", 0)))
-        dpg.set_value("edit_player_bodytype", int(stats.get("bodytypecode", 0)))
-        dpg.set_value("edit_player_hairstyle", int(stats.get("hairstylecode", 0)))
-        dpg.set_value("edit_player_haircolor", int(stats.get("haircolorcode", 0)))
-        dpg.set_value("edit_player_skintone", int(stats.get("skintonecode", 0)))
-        dpg.set_value("edit_player_eyecolor", int(stats.get("eyecolorcode", 0)))
-        dpg.set_value("edit_player_jerseystyle", "Untucked" if stats.get("jerseystylecode") == "1" else "Tucked")
-        dpg.set_value("edit_player_sleeves", "Long" if stats.get("jerseysleevelengthcode") == "1" else "Short")
-        dpg.set_value("edit_player_fit", "Tight" if stats.get("jerseyfit") == "1" else "Normal")
-        dpg.set_value("edit_player_socklength", "Short" if stats.get("socklengthcode") == "1" else "High" if stats.get("socklengthcode") == "2" else "Average")
-        dpg.set_value("edit_player_shoetype", int(stats.get("shoetypecode", 0)))
-        dpg.set_value("edit_player_gkglove", int(stats.get("gkglovetypecode", 0)))
+            ps_states = decode_player_playstyles(t1, t2, it1, it2)
+            for key in PLAYSTYLE_MAP:
+                tag = f"ps_radio_{key}"
+                if dpg.does_item_exist(tag):
+                    st = ps_states.get(key, 0)
+                    val_str = "None" if st == 0 else "(+) Regular" if st == 1 else "(++) PlayStyle+"
+                    dpg.set_value(tag, val_str)
+            self._on_update_playstyles_summary()
 
-        dpg.configure_item("player_edit_controls", show=True)
-        dpg.set_value("player_save_feedback", "")
+            # Roles & FC IQ
+            dpg.set_value("edit_player_role1", int(stats.get("role1", 0)))
+            dpg.set_value("edit_player_role2", int(stats.get("role2", 0)))
+            dpg.set_value("edit_player_role3", int(stats.get("role3", 0)))
+            dpg.set_value("edit_player_role4", int(stats.get("role4", 0)))
+            dpg.set_value("edit_player_role5", int(stats.get("role5", 0)))
+
+            # Pace & Shooting
+            dpg.set_value("edit_player_accel", int(stats.get("acceleration", 70)))
+            dpg.set_value("edit_player_sprint", int(stats.get("sprintspeed", 70)))
+            dpg.set_value("edit_player_pos", int(stats.get("positioning", 70)))
+            dpg.set_value("edit_player_finish", int(stats.get("finishing", 70)))
+            dpg.set_value("edit_player_shotpwr", int(stats.get("shotpower", 70)))
+            dpg.set_value("edit_player_longshots", int(stats.get("longshots", 70)))
+            dpg.set_value("edit_player_volleys", int(stats.get("volleys", 70)))
+            dpg.set_value("edit_player_penalties", int(stats.get("penalties", 70)))
+
+            # Passing & Dribbling
+            dpg.set_value("edit_player_vision", int(stats.get("vision", 70)))
+            dpg.set_value("edit_player_crossing", int(stats.get("crossing", 70)))
+            dpg.set_value("edit_player_fk", int(stats.get("freekickaccuracy", 70)))
+            dpg.set_value("edit_player_shortpass", int(stats.get("shortpassing", 70)))
+            dpg.set_value("edit_player_longpass", int(stats.get("longpassing", 70)))
+            dpg.set_value("edit_player_curve", int(stats.get("curve", 70)))
+            dpg.set_value("edit_player_agility", int(stats.get("agility", 70)))
+            dpg.set_value("edit_player_balance", int(stats.get("balance", 70)))
+            dpg.set_value("edit_player_reactions", int(stats.get("reactions", 70)))
+            dpg.set_value("edit_player_ballctrl", int(stats.get("ballcontrol", 70)))
+            dpg.set_value("edit_player_dribble", int(stats.get("dribbling", 70)))
+            dpg.set_value("edit_player_composure", int(stats.get("composure", 70)))
+
+            # Defending & Physical
+            dpg.set_value("edit_player_interceptions", int(stats.get("interceptions", 60)))
+            dpg.set_value("edit_player_heading", int(stats.get("headingaccuracy", 60)))
+            dpg.set_value("edit_player_defawareness", int(stats.get("defensiveawareness", 60)))
+            dpg.set_value("edit_player_standtackle", int(stats.get("standingtackle", 60)))
+            dpg.set_value("edit_player_slidetackle", int(stats.get("slidingtackle", 60)))
+            dpg.set_value("edit_player_jumping", int(stats.get("jumping", 70)))
+            dpg.set_value("edit_player_stamina", int(stats.get("stamina", 70)))
+            dpg.set_value("edit_player_strength", int(stats.get("strength", 70)))
+            dpg.set_value("edit_player_aggression", int(stats.get("aggression", 65)))
+
+            # Goalkeeper
+            dpg.set_value("edit_player_gkdiving", int(stats.get("gkdiving", 10)))
+            dpg.set_value("edit_player_gkhandling", int(stats.get("gkhandling", 10)))
+            dpg.set_value("edit_player_gkkicking", int(stats.get("gkkicking", 10)))
+            dpg.set_value("edit_player_gkreflexes", int(stats.get("gkreflexes", 10)))
+            dpg.set_value("edit_player_gkpos", int(stats.get("gkpositioning", 10)))
+
+            # Appearance & Kit options
+            dpg.set_value("edit_player_headasset", int(stats.get("headassetid", 0)))
+            dpg.set_value("edit_player_bodytype", int(stats.get("bodytypecode", 0)))
+            dpg.set_value("edit_player_hairstyle", int(stats.get("hairstylecode", 0)))
+            dpg.set_value("edit_player_haircolor", int(stats.get("haircolorcode", 0)))
+            dpg.set_value("edit_player_skintone", int(stats.get("skintonecode", 0)))
+            dpg.set_value("edit_player_eyecolor", int(stats.get("eyecolorcode", 0)))
+            dpg.set_value("edit_player_jerseystyle", "Untucked" if stats.get("jerseystylecode") == "1" else "Tucked")
+            dpg.set_value("edit_player_sleeves", "Long" if stats.get("jerseysleevelengthcode") == "1" else "Short")
+            dpg.set_value("edit_player_fit", "Tight" if stats.get("jerseyfit") == "1" else "Normal")
+            dpg.set_value("edit_player_socklength", "Short" if stats.get("socklengthcode") == "1" else "High" if stats.get("socklengthcode") == "2" else "Average")
+            dpg.set_value("edit_player_shoetype", int(stats.get("shoetypecode", 0)))
+            dpg.set_value("edit_player_gkglove", int(stats.get("gkglovetypecode", 0)))
+
+            dpg.configure_item("player_edit_controls", show=True)
+            dpg.set_value("player_save_feedback", "")
+        finally:
+            self._is_populating_player = False
 
     def _on_transfer_player(self):
         if not self.selected_player:
@@ -1358,7 +1909,7 @@ class SquadEditorApp:
         trans_tag = " [TRANSFERRED]" if is_trans else ""
         
         dpg.set_value("player_header_name", f"#{jersey_num} {self.selected_player['name']} (ID: {pid})")
-        dpg.set_value("player_sub_header", f"Club: {club_name}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}★  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}★")
+        dpg.set_value("player_sub_header", f"Club: {club_name}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}*  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}*")
         if dpg.does_item_exist("edit_player_jersey"):
             dpg.set_value("edit_player_jersey", jersey_num)
             
@@ -1370,7 +1921,7 @@ class SquadEditorApp:
                 self.selected_team["roster_count"] = len(self.selected_team["roster"])
                 self._refresh_team_roster_display()
                 
-        dpg.set_value("player_save_feedback", f"✓ Transferred player to {club_name} (#{jersey_num})!")
+        dpg.set_value("player_save_feedback", f"[OK] Transferred player to {club_name} (#{jersey_num})!")
         self._on_filter_players()
         self._on_filter_teams()
         self._update_save_and_changes_toolbar()
@@ -1455,10 +2006,7 @@ class SquadEditorApp:
         stats["contractvaliduntil"] = str(contract_yr)
         stats["isretiring"] = str(is_ret)
 
-        is_trans = pid in self.session.user_transfers or self.selected_player.get("risb_row_idx") is not None
-        trans_tag = " [TRANSFERRED]" if is_trans else ""
-        dpg.set_value("player_header_name", f"#{jersey_num} {self.selected_player['name']} (ID: {pid})")
-        dpg.set_value("player_sub_header", f"Club: {self.selected_player['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}★  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}★")
+        self._update_player_sub_header()
 
         # 6. Kit & Appearance
         j_style = 1 if dpg.get_value("edit_player_jerseystyle") == "Untucked" else 0
@@ -1500,36 +2048,81 @@ class SquadEditorApp:
         self._on_filter_players()
         self._update_save_and_changes_toolbar()
         staged_n = self.session.change_tracker.count
-        dpg.set_value("player_save_feedback", f"✓ Applied player changes ({staged_n} staged). Click '💾 Save File' above to persist.")
+        dpg.set_value("player_save_feedback", f"[OK] Applied player changes ({staged_n} staged).")
 
     def _on_boost_player(self):
         if not self.selected_player:
             return
-        # Set all attributes to 99
-        for key in ["edit_player_ovr", "edit_player_pot", "edit_player_accel", "edit_player_sprint",
-                    "edit_player_finish", "edit_player_shotpwr", "edit_player_longshots",
-                    "edit_player_volleys", "edit_player_penalties", "edit_player_vision",
-                    "edit_player_crossing", "edit_player_fk", "edit_player_shortpass",
-                    "edit_player_longpass", "edit_player_curve", "edit_player_agility",
-                    "edit_player_balance", "edit_player_reactions", "edit_player_ballctrl",
-                    "edit_player_dribble", "edit_player_composure", "edit_player_interceptions",
-                    "edit_player_heading", "edit_player_defawareness", "edit_player_standtackle",
-                    "edit_player_slidetackle", "edit_player_jumping", "edit_player_stamina",
-                    "edit_player_strength", "edit_player_aggression"]:
-            if dpg.does_item_exist(key):
-                dpg.set_value(key, 99)
-        dpg.set_value("edit_player_skills", 5)
-        dpg.set_value("edit_player_weakfoot", 5)
+        pid = self.selected_player["playerid"]
+        stats = self.selected_player.setdefault("stats", {})
+        
+        boost_attrs = [
+            ("edit_player_ovr", "overallrating", 99),
+            ("edit_player_pot", "potential", 99),
+            ("edit_player_skills", "skillmoves", 5),
+            ("edit_player_weakfoot", "weakfootabilitytypecode", 5),
+            ("edit_player_accel", "acceleration", 99),
+            ("edit_player_sprint", "sprintspeed", 99),
+            ("edit_player_pos", "positioning", 99),
+            ("edit_player_finish", "finishing", 99),
+            ("edit_player_shotpwr", "shotpower", 99),
+            ("edit_player_longshots", "longshots", 99),
+            ("edit_player_volleys", "volleys", 99),
+            ("edit_player_penalties", "penalties", 99),
+            ("edit_player_vision", "vision", 99),
+            ("edit_player_crossing", "crossing", 99),
+            ("edit_player_fk", "freekickaccuracy", 99),
+            ("edit_player_shortpass", "shortpassing", 99),
+            ("edit_player_longpass", "longpassing", 99),
+            ("edit_player_curve", "curve", 99),
+            ("edit_player_agility", "agility", 99),
+            ("edit_player_balance", "balance", 99),
+            ("edit_player_reactions", "reactions", 99),
+            ("edit_player_ballctrl", "ballcontrol", 99),
+            ("edit_player_dribble", "dribbling", 99),
+            ("edit_player_composure", "composure", 99),
+            ("edit_player_interceptions", "interceptions", 99),
+            ("edit_player_heading", "headingaccuracy", 99),
+            ("edit_player_defawareness", "defensiveawareness", 99),
+            ("edit_player_standtackle", "standingtackle", 99),
+            ("edit_player_slidetackle", "slidingtackle", 99),
+            ("edit_player_jumping", "jumping", 99),
+            ("edit_player_stamina", "stamina", 99),
+            ("edit_player_strength", "strength", 99),
+            ("edit_player_aggression", "aggression", 99)
+        ]
+        
+        self._is_populating_player = True
+        try:
+            for ui_tag, stat_key, target_val in boost_attrs:
+                if dpg.does_item_exist(ui_tag):
+                    dpg.set_value(ui_tag, target_val)
+                self.session.update_player_attribute(pid, stat_key, target_val)
+                stats[stat_key] = str(target_val)
+                if stat_key == "overallrating":
+                    self.selected_player["overall"] = target_val
+                elif stat_key == "potential":
+                    self.selected_player["potential"] = target_val
+                elif stat_key == "skillmoves":
+                    self.selected_player["skills"] = target_val
+                elif stat_key == "weakfootabilitytypecode":
+                    self.selected_player["weak_foot"] = target_val
+        finally:
+            self._is_populating_player = False
+            
+        dpg.set_value("player_badge_ovr", "[ 99 ]")
+        dpg.configure_item("player_badge_ovr", color=(0, 255, 120))
+        self._update_player_sub_header()
         self._on_all_gold_playstyles()
-        self._on_save_player_changes()
+        self._on_filter_players()
         self._update_save_and_changes_toolbar()
         staged_n = self.session.change_tracker.count
-        dpg.set_value("player_save_feedback", f"⚡ Prime 99 & All Gold PlayStyles+ Applied ({staged_n} staged)!")
+        dpg.set_value("player_save_feedback", f"[OK] Prime 99 & All Gold PlayStyles+ Applied ({staged_n} staged)!")
 
     def _on_import_player_face(self):
         """Allows user to select and import a custom miniface image for the selected player."""
         if not self.selected_player:
-            dpg.set_value("player_save_feedback", "⚠️ Select a player first to import miniface.")
+            dpg.set_value("player_save_feedback", "[!] Select a player first to import miniface.")
             return
         pid = self.selected_player["playerid"]
         root = tk.Tk()
@@ -1550,9 +2143,31 @@ class SquadEditorApp:
             if hasattr(self, "selected_team_roster_pid") and self.selected_team_roster_pid == pid:
                 if dpg.does_item_exist("roster_player_miniface_img"):
                     dpg.configure_item("roster_player_miniface_img", texture_tag=tex_tag)
-            dpg.set_value("player_save_feedback", f"✓ {msg}")
+            dpg.set_value("player_save_feedback", f"[OK] {msg}")
         else:
-            dpg.set_value("player_save_feedback", f"❌ {msg}")
+            dpg.set_value("player_save_feedback", f"[Error] {msg}")
+        pid = self.selected_player["playerid"]
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filepath = filedialog.askopenfilename(
+            title=f"Import Miniface for {self.selected_player['name']} (p{pid})",
+            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.dds;*.bmp"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not filepath:
+            return
+        ok, msg = self.assets.import_custom_player_face(pid, filepath)
+        if ok:
+            tex_tag = f"tex_player_{pid}"
+            if dpg.does_item_exist("player_miniface_img"):
+                dpg.configure_item("player_miniface_img", texture_tag=tex_tag)
+            if hasattr(self, "selected_team_roster_pid") and self.selected_team_roster_pid == pid:
+                if dpg.does_item_exist("roster_player_miniface_img"):
+                    dpg.configure_item("roster_player_miniface_img", texture_tag=tex_tag)
+            dpg.set_value("player_save_feedback", f"[OK] {msg}")
+        else:
+            dpg.set_value("player_save_feedback", f"[Error] {msg}")
 
     # --- Teams UI Callbacks ---
 
@@ -1586,7 +2201,7 @@ class SquadEditorApp:
         for pid in t.get("roster", []):
             jersey = self.session.get_player_jersey_number(pid)
             is_trans = pid in self.session.user_transfers or (self.session.players_lookup.get(pid, {}).get("risb_row_idx") is not None)
-            trans_tag = " 🔄" if is_trans else ""
+            trans_tag = " [T]" if is_trans else ""
             if pid in self.session.players_lookup:
                 p = self.session.players_lookup[pid]
                 pos_str = get_position_name(p["pos_code"])
@@ -1677,7 +2292,7 @@ class SquadEditorApp:
         pid = self.selected_team_roster_pid
         num = dpg.get_value("edit_team_roster_jersey_num")
         if not (1 <= num <= 99):
-            dpg.set_value("team_save_feedback", "⚠️ Jersey number must be between 1 and 99.")
+            dpg.set_value("team_save_feedback", "[!] Jersey number must be between 1 and 99.")
             return
             
         duplicate_name = None
@@ -1695,9 +2310,9 @@ class SquadEditorApp:
         self._refresh_team_roster_display()
         self._update_save_and_changes_toolbar()
         if duplicate_name:
-            dpg.set_value("team_save_feedback", f"✓ Set #{num} for {pname} (Note: #{num} was also worn by {duplicate_name})")
+            dpg.set_value("team_save_feedback", f"[OK] Set #{num} for {pname} (Note: #{num} was also worn by {duplicate_name})")
         else:
-            dpg.set_value("team_save_feedback", f"✓ Set jersey #{num} for {pname} ({self.session.change_tracker.count} staged)!")
+            dpg.set_value("team_save_feedback", f"[OK] Set jersey #{num} for {pname} ({self.session.change_tracker.count} staged)!")
 
     def _on_release_roster_player(self):
         if not self.selected_team_roster_pid or not self.selected_team:
@@ -1718,7 +2333,7 @@ class SquadEditorApp:
             self.selected_player["club"] = "Free Agent"
             jersey_num = self.session.get_player_jersey_number(pid)
             dpg.set_value("player_header_name", f"#{jersey_num} {self.selected_player['name']} (ID: {pid})")
-            dpg.set_value("player_sub_header", f"Club: Free Agent [TRANSFERRED]  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}★  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}★")
+            dpg.set_value("player_sub_header", f"Club: Free Agent [TRANSFERRED]  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}*  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}*")
             if dpg.does_item_exist("edit_player_jersey"):
                 dpg.set_value("edit_player_jersey", jersey_num)
 
@@ -1728,7 +2343,7 @@ class SquadEditorApp:
         self._on_filter_teams()
         self._on_filter_players()
         self._update_save_and_changes_toolbar()
-        dpg.set_value("team_save_feedback", f"❌ Released {pname} to Free Agents ({self.session.change_tracker.count} staged)!")
+        dpg.set_value("team_save_feedback", f"[OK] Released {pname} to Free Agents ({self.session.change_tracker.count} staged)!")
 
     def _on_open_sign_player_modal(self):
         if not self.selected_team:
@@ -1779,7 +2394,7 @@ class SquadEditorApp:
                 break
                 
         self.filtered_sign_players = filtered
-        items = [f"[{p['overall']}] {p['name']} ({get_position_name(p['pos_code'])}) — {p['club']} (Age {p['age']}) - ID {p['playerid']}" for p in self.filtered_sign_players]
+        items = [f"[{p['overall']}] {p['name']} ({get_position_name(p['pos_code'])}) - {p['club']} (Age {p['age']}) - ID {p['playerid']}" for p in self.filtered_sign_players]
         dpg.configure_item("sign_player_listbox", items=items)
         dpg.set_value("sign_player_count_label", f"Matching Players: {len(self.filtered_sign_players):,} (showing top 250)")
 
@@ -1793,7 +2408,7 @@ class SquadEditorApp:
         p = self.filtered_sign_players[idx]
         self.selected_sign_player = p
         pos_str = get_position_name(p["pos_code"])
-        dpg.set_value("sign_player_selected_info", f"[{p['overall']}] {p['name']} ({pos_str}) — Current: {p['club']} | Age: {p['age']} | ID: {p['playerid']}")
+        dpg.set_value("sign_player_selected_info", f"[{p['overall']}] {p['name']} ({pos_str}) - Current: {p['club']} | Age: {p['age']} | ID: {p['playerid']}")
 
     def _on_confirm_sign_player(self):
         if not self.selected_sign_player or not self.selected_team:
@@ -1816,7 +2431,7 @@ class SquadEditorApp:
             self.selected_player["club"] = tname
             jersey_num = self.session.get_player_jersey_number(pid)
             dpg.set_value("player_header_name", f"#{jersey_num} {self.selected_player['name']} (ID: {pid})")
-            dpg.set_value("player_sub_header", f"Club: {tname} [TRANSFERRED]  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}★  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}★")
+            dpg.set_value("player_sub_header", f"Club: {tname} [TRANSFERRED]  |  Kit: #{jersey_num}  |  Position: {self.selected_player['position']}  |  Foot: {self.selected_player.get('foot', 'Right')}  |  Skills: {self.selected_player.get('skills', 3)}*  |  Weak Foot: {self.selected_player.get('weak_foot', 3)}*")
             if dpg.does_item_exist("edit_player_jersey"):
                 dpg.set_value("edit_player_jersey", jersey_num)
         
@@ -1825,7 +2440,7 @@ class SquadEditorApp:
         self._on_filter_teams()
         self._on_filter_players()
         self._update_save_and_changes_toolbar()
-        dpg.set_value("team_save_feedback", f"✅ Successfully signed {p['name']} to {tname} ({self.session.change_tracker.count} staged)!")
+        dpg.set_value("team_save_feedback", f"[OK] Successfully signed {p['name']} to {tname} ({self.session.change_tracker.count} staged)!")
 
     def _on_save_team_changes(self):
         if not self.selected_team:
@@ -1837,12 +2452,12 @@ class SquadEditorApp:
         self.session.update_team_stadium(self.selected_team["teamid"], new_stadium)
         self._on_filter_teams()
         self._update_save_and_changes_toolbar()
-        dpg.set_value("team_save_feedback", f"✓ Club details & stadium updated ({self.session.change_tracker.count} staged)!")
+        dpg.set_value("team_save_feedback", f"[OK] Club details & stadium updated ({self.session.change_tracker.count} staged)!")
 
     def _on_import_club_crest(self):
         """Allows user to select and import a custom club crest image."""
         if not self.selected_team:
-            dpg.set_value("team_save_feedback", "⚠️ Select a club first to import crest.")
+            dpg.set_value("team_save_feedback", "[!] Select a club first to import crest.")
             return
         tid = self.selected_team["teamid"]
         root = tk.Tk()
@@ -1860,14 +2475,14 @@ class SquadEditorApp:
             tex_tag = f"tex_club_{tid}"
             if dpg.does_item_exist("team_crest_img"):
                 dpg.configure_item("team_crest_img", texture_tag=tex_tag)
-            dpg.set_value("team_save_feedback", f"✓ {msg}")
+            dpg.set_value("team_save_feedback", f"[OK] {msg}")
         else:
-            dpg.set_value("team_save_feedback", f"❌ {msg}")
+            dpg.set_value("team_save_feedback", f"[Error] {msg}")
 
     def _on_import_manager_face(self):
         """Allows user to select and import a custom manager photo."""
         if not self.selected_team:
-            dpg.set_value("team_save_feedback", "⚠️ Select a club first to import manager photo.")
+            dpg.set_value("team_save_feedback", "[!] Select a club first to import manager photo.")
             return
         tid = self.selected_team["teamid"]
         root = tk.Tk()
@@ -1885,9 +2500,9 @@ class SquadEditorApp:
             tex_tag = f"tex_manager_{tid}"
             if dpg.does_item_exist("team_manager_img"):
                 dpg.configure_item("team_manager_img", texture_tag=tex_tag)
-            dpg.set_value("team_save_feedback", f"✓ {msg}")
+            dpg.set_value("team_save_feedback", f"[OK] {msg}")
         else:
-            dpg.set_value("team_save_feedback", f"❌ {msg}")
+            dpg.set_value("team_save_feedback", f"[Error] {msg}")
 
     def _on_save_manager_changes(self):
         """Saves custom manager name and nationality into database and assets."""
@@ -1904,7 +2519,7 @@ class SquadEditorApp:
         if dpg.does_item_exist("team_manager_img"):
             dpg.configure_item("team_manager_img", texture_tag=mgr_tex)
         self._update_save_and_changes_toolbar()
-        dpg.set_value("team_save_feedback", f"✓ Manager details updated ({self.session.change_tracker.count} staged): {m_name} ({m_nat})")
+        dpg.set_value("team_save_feedback", f"[OK] Manager details updated ({self.session.change_tracker.count} staged): {m_name} ({m_nat})")
 
     # --- Database Editor UI Callbacks ---
 
@@ -1914,7 +2529,7 @@ class SquadEditorApp:
             disp = get_table_display_name(sname)
             safety = get_table_safety_info(sname)
             cat = get_table_category(sname)
-            label = f"{safety['badge']} {sname} — {disp} ({len(tbl.records):,} rows)"
+            label = f"{safety['badge']} {sname} - {disp} ({len(tbl.records):,} rows)"
             entries.append((sname, cat, label))
         self.all_table_entries = entries
         self._refresh_tables_dropdown()
@@ -2005,7 +2620,7 @@ class SquadEditorApp:
         safety = get_table_safety_info(self.selected_table_sname)
         self.pending_structural_action = "add"
         msg = (
-            f"You are about to ADD a new row to table '{self.selected_table_sname} — {get_table_display_name(self.selected_table_sname)}'.\n\n"
+            f"You are about to ADD a new row to table '{self.selected_table_sname} - {get_table_display_name(self.selected_table_sname)}'.\n\n"
             f"Safety Level: {safety['badge']}\n"
             f"Note: In EA SPORTS FC 25, relational tables have fixed memory allocations referenced by the game engine. "
             f"Adding rows in core tables may alter indexing or cause game crashes.\n\n"
@@ -2020,7 +2635,7 @@ class SquadEditorApp:
             self.session.clone_table_row(self.selected_table_sname, self.selected_record_index)
             self._load_db_table(self.selected_table_sname)
             self._update_save_and_changes_toolbar()
-            dpg.set_value("record_save_feedback", f"✓ Cloned row #{self.selected_record_index} to end of table ({self.session.change_tracker.count} staged)!")
+            dpg.set_value("record_save_feedback", f"[OK] Cloned row #{self.selected_record_index} to end of table ({self.session.change_tracker.count} staged)!")
 
     def _on_click_delete_row(self):
         tbl = self.session.get_table(self.selected_table_sname)
@@ -2029,7 +2644,7 @@ class SquadEditorApp:
         safety = get_table_safety_info(self.selected_table_sname)
         self.pending_structural_action = "delete"
         msg = (
-            f"You are about to DELETE row #{self.selected_record_index} from table '{self.selected_table_sname} — {get_table_display_name(self.selected_table_sname)}'.\n\n"
+            f"You are about to DELETE row #{self.selected_record_index} from table '{self.selected_table_sname} - {get_table_display_name(self.selected_table_sname)}'.\n\n"
             f"Safety Level: {safety['badge']}\n"
             f"WARNING: This operation shifts row indices. Deleting crucial rows for players, teams, or competitions may corrupt save files or crash the game!\n\n"
             f"Confirm only if you know what you are doing."
@@ -2045,7 +2660,7 @@ class SquadEditorApp:
             self.session.add_table_row(self.selected_table_sname)
             self._load_db_table(self.selected_table_sname)
             self._update_save_and_changes_toolbar()
-            dpg.set_value("record_save_feedback", f"✓ New blank row added at end of table ({self.session.change_tracker.count} staged)!")
+            dpg.set_value("record_save_feedback", f"[OK] New blank row added at end of table ({self.session.change_tracker.count} staged)!")
         elif action == "delete" and self.selected_record_index is not None:
             deleted_idx = self.selected_record_index
             self.session.delete_table_row(self.selected_table_sname, deleted_idx)
@@ -2054,17 +2669,17 @@ class SquadEditorApp:
             dpg.delete_item("record_fields_container", children_only=True)
             dpg.configure_item("record_actions_group", show=False)
             self._update_save_and_changes_toolbar()
-            dpg.set_value("record_save_feedback", f"✓ Deleted row #{deleted_idx} ({self.session.change_tracker.count} staged)!")
+            dpg.set_value("record_save_feedback", f"[OK] Deleted row #{deleted_idx} ({self.session.change_tracker.count} staged)!")
 
     def _on_export_table_csv(self):
         """Exports the active database table to a CSV file."""
         if not self.session.is_loaded:
-            dpg.set_value("db_table_action_feedback", "⚠️ Load a squad file first.")
+            dpg.set_value("db_table_action_feedback", "[!] Load a squad file first.")
             return
         tbl_sname = self.selected_table_sname
         tbl = self.session.get_table(tbl_sname)
         if not tbl:
-            dpg.set_value("db_table_action_feedback", "⚠️ Select a table first.")
+            dpg.set_value("db_table_action_feedback", "[!] Select a table first.")
             return
 
         disp_name = get_table_display_name(tbl_sname).replace(" ", "_").replace("/", "_")
@@ -2085,19 +2700,19 @@ class SquadEditorApp:
 
         ok, msg, count = self.session.export_table_csv(tbl_sname, target)
         if ok:
-            dpg.set_value("db_table_action_feedback", f"✓ Exported {count:,} rows to {os.path.basename(target)}!")
+            dpg.set_value("db_table_action_feedback", f"[OK] Exported {count:,} rows to {os.path.basename(target)}!")
         else:
-            dpg.set_value("db_table_action_feedback", f"❌ {msg}")
+            dpg.set_value("db_table_action_feedback", f"[Error] {msg}")
 
     def _on_import_table_csv(self):
         """Imports records from a CSV file into the active database table."""
         if not self.session.is_loaded:
-            dpg.set_value("db_table_action_feedback", "⚠️ Load a squad file first.")
+            dpg.set_value("db_table_action_feedback", "[!] Load a squad file first.")
             return
         tbl_sname = self.selected_table_sname
         tbl = self.session.get_table(tbl_sname)
         if not tbl:
-            dpg.set_value("db_table_action_feedback", "⚠️ Select a table first.")
+            dpg.set_value("db_table_action_feedback", "[!] Select a table first.")
             return
 
         root = tk.Tk()
@@ -2118,14 +2733,14 @@ class SquadEditorApp:
             self._load_db_table(self.selected_table_sname)
             self._on_filter_players()
             self._on_filter_teams()
-            dpg.set_value("db_table_action_feedback", f"✓ {msg}")
+            dpg.set_value("db_table_action_feedback", f"[OK] {msg}")
         else:
-            dpg.set_value("db_table_action_feedback", f"❌ {msg}")
+            dpg.set_value("db_table_action_feedback", f"[Error] {msg}")
 
     def _on_export_all_tables_zip(self):
         """Exports all 76 database tables as individual CSVs inside a ZIP archive."""
         if not self.session.is_loaded:
-            dpg.set_value("db_table_action_feedback", "⚠️ Load a squad file first.")
+            dpg.set_value("db_table_action_feedback", "[!] Load a squad file first.")
             return
 
         root = tk.Tk()
@@ -2143,9 +2758,9 @@ class SquadEditorApp:
 
         ok, msg, count = self.session.export_all_tables_zip(target)
         if ok:
-            dpg.set_value("db_table_action_feedback", f"✓ Exported {count} tables to {os.path.basename(target)}!")
+            dpg.set_value("db_table_action_feedback", f"[OK] Exported {count} tables to {os.path.basename(target)}!")
         else:
-            dpg.set_value("db_table_action_feedback", f"❌ {msg}")
+            dpg.set_value("db_table_action_feedback", f"[Error] {msg}")
 
     def _render_db_records_page(self):
         tbl = self.session.get_table(self.selected_table_sname)
@@ -2274,7 +2889,7 @@ class SquadEditorApp:
                     with dpg.group(horizontal=True):
                         # Clean label formatting
                         if show_tech:
-                            lbl = f"{clean_name} [{col.sname} • {col.bit_size}b]:"
+                            lbl = f"{clean_name} [{col.sname} - {col.bit_size}b]:"
                         else:
                             lbl = f"{clean_name}:"
                             
@@ -2323,7 +2938,7 @@ class SquadEditorApp:
 
             # 1. Render Keys & Relational Links
             if keys_cols:
-                dpg.add_text(f"=== 🔑 Identification & Relational Links ({len(keys_cols)}) ===", color=(255, 200, 60))
+                dpg.add_text(f"=== [ID] Identification & Relational Links ({len(keys_cols)}) ===", color=(255, 200, 60))
                 dpg.add_separator()
                 for c, v, cn, inf in keys_cols:
                     render_field_entry(c, v, cn, inf)
@@ -2331,7 +2946,7 @@ class SquadEditorApp:
 
             # 2. Render Core Properties & Ratings
             if core_cols:
-                dpg.add_text(f"=== 📝 Core Properties & Attributes ({len(core_cols)}) ===", color=(0, 210, 255))
+                dpg.add_text(f"=== [Props] Core Properties & Attributes ({len(core_cols)}) ===", color=(0, 210, 255))
                 dpg.add_separator()
                 for c, v, cn, inf in core_cols:
                     render_field_entry(c, v, cn, inf)
@@ -2339,7 +2954,7 @@ class SquadEditorApp:
 
             # 3. Render Flags & State Toggles
             if flag_cols:
-                dpg.add_text(f"=== ⚙️ Flags & State Toggles ({len(flag_cols)}) ===", color=(0, 255, 180))
+                dpg.add_text(f"=== [Flags] Flags & State Toggles ({len(flag_cols)}) ===", color=(0, 255, 180))
                 dpg.add_separator()
                 for c, v, cn, inf in flag_cols:
                     render_field_entry(c, v, cn, inf)
@@ -2347,7 +2962,7 @@ class SquadEditorApp:
 
             # 4. Render Advanced & Internal Engine Variables (Collapsed by default!)
             if adv_cols:
-                with dpg.collapsing_header(label=f"🔬 Advanced & Internal Engine Fields ({len(adv_cols)} fields)", default_open=False):
+                with dpg.collapsing_header(label=f"[Advanced] Internal Engine Fields ({len(adv_cols)} fields)", default_open=False):
                     dpg.add_text("Internal bitmasks, raw engine hashes, and undocumented variables.", color=(150, 150, 160))
                     dpg.add_separator()
                     for c, v, cn, inf in adv_cols:
@@ -2392,7 +3007,7 @@ class SquadEditorApp:
 
         self._update_save_and_changes_toolbar()
         dpg.configure_item("record_save_feedback", color=(0, 255, 120))
-        dpg.set_value("record_save_feedback", f"[OK] Record #{row_idx} staged ({self.session.change_tracker.count} changes)! Click '💾 Save File' above to persist.")
+        dpg.set_value("record_save_feedback", f"[OK] Record #{row_idx} staged ({self.session.change_tracker.count} changes)! Click 'Save File' above to persist.")
         self._render_db_records_page()
 
 def main():

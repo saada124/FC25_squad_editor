@@ -414,7 +414,7 @@ def classify_column(table_sname: str, col_sname: str, col_type: int, bit_size: i
             "role": "PRIMARY_KEY",
             "badge": "[Primary Key]",
             "badge_color": (255, 90, 90),
-            "warning": "⚠️ Primary Key: Modifying this ID changes this record's identity across the database!",
+            "warning": "[!] Primary Key: Modifying this ID changes this record's identity across the database!",
             "target_entity": None,
             "clean_name": clean_name
         }
@@ -451,7 +451,7 @@ def classify_column(table_sname: str, col_sname: str, col_type: int, bit_size: i
             "role": "RAW_BLOB",
             "badge": f"[{bit_size}b Blob]",
             "badge_color": (200, 160, 100),
-            "warning": "⚠️ Large Raw Bitfield: Direct modification may affect internal engine states.",
+            "warning": "[!] Large Raw Bitfield: Direct modification may affect internal engine states.",
             "target_entity": None,
             "clean_name": clean_name
         }
