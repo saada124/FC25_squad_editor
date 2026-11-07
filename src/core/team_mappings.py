@@ -8,196 +8,203 @@ and roster assignments.
 from typing import Dict, Set, Optional
 
 # Mapping of Secondary/Women's Team ID -> Primary/Men's Team ID
-# Contains both authentic 4-byte Frostbite IDs (>= 65536) and truncated legacy IDs.
+# Contains authentic 4-byte Frostbite IDs (from FIFA DB v8 kISL.DmlS + 1) and legacy 2-byte IDs.
 SECONDARY_TO_PRIMARY_TEAMS: Dict[int, int] = {
-    131124: 1334,     # Finland (Authentic)
-    52: 1334,     # Finland (Legacy)
-    131358: 234,     # SL Benfica (Authentic)
-    286: 234,     # SL Benfica (Legacy)
-    131359: 245,     # Ajax (Authentic)
-    287: 245,     # Ajax (Legacy)
-    131360: 266,     # Slavia Praha (Authentic)
-    288: 266,     # Slavia Praha (Legacy)
-    131361: 894,     # FC Zürich (Authentic)
-    289: 894,     # FC Zürich (Legacy)
-    131368: 46056,     # Free Agents (Authentic)
-    296: 46056,     # Free Agents (Legacy)
-    131391: 45296,     # Granada CF (Authentic)
-    319: 45296,     # Granada CF (Legacy)
-    131720: 242,     # RC Deportivo (Authentic)
-    648: 242,     # RC Deportivo (Legacy)
-    131724: 76,     # Strasbourg (Authentic)
-    652: 76,     # Strasbourg (Legacy)
-    131725: 1799,     # Crystal Palace (Authentic)
-    653: 1799,     # Crystal Palace (Legacy)
-    131733: 452,     # RCD Espanyol (Authentic)
-    661: 452,     # RCD Espanyol (Legacy)
-    111325: 1891,     # Nacional (Authentic)
-    45789: 1891,     # Nacional (Legacy)
-    112615: 35549,     # Racing Club (Authentic)
-    47079: 35549,     # Racing Club (Legacy)
-    113002: 1318,     # England (Authentic)
-    47466: 1318,     # England (Legacy)
-    113003: 1335,     # France (Authentic)
-    47467: 1335,     # France (Legacy)
-    113004: 1337,     # Germany (Authentic)
-    47468: 1337,     # Germany (Legacy)
-    113007: 1352,     # Norway (Authentic)
-    47471: 1352,     # Norway (Legacy)
-    113008: 1363,     # Sweden (Authentic)
-    47472: 1363,     # Sweden (Legacy)
-    113009: 1387,     # United States (Authentic)
-    47473: 1387,     # United States (Legacy)
-    113010: 1386,     # Mexico (Authentic)
-    47474: 1386,     # Mexico (Legacy)
-    113011: 39499,     # Netherlands (Authentic)
-    47475: 39499,     # Netherlands (Legacy)
-    113012: 1362,     # Spain (Authentic)
-    47476: 1362,     # Spain (Legacy)
-    113984: 1359,     # Scotland (Authentic)
-    48448: 1359,     # Scotland (Legacy)
-    113996: 1369,     # Argentina (Authentic)
-    48460: 1369,     # Argentina (Legacy)
-    115682: 1354,     # Portugal (Authentic)
-    50146: 1354,     # Portugal (Legacy)
-    115995: 21,     # FC Bayern München (Authentic)
-    50459: 21,     # FC Bayern München (Legacy)
-    115996: 32,     # Leverkusen (Authentic)
-    50460: 32,     # Leverkusen (Legacy)
-    115997: 1824,     # Frankfurt (Authentic)
-    50461: 1824,     # Frankfurt (Legacy)
-    115998: 175,     # VfL Wolfsburg (Authentic)
-    50462: 175,     # VfL Wolfsburg (Legacy)
-    115999: 10029,     # TSG Hoffenheim (Authentic)
-    50463: 10029,     # TSG Hoffenheim (Legacy)
-    116002: 25,     # SC Freiburg (Authentic)
-    50466: 25,     # SC Freiburg (Legacy)
-    116003: 31,     # 1. FC Köln (Authentic)
-    50467: 31,     # 1. FC Köln (Legacy)
-    116004: 38,     # SV Werder Bremen (Authentic)
-    50468: 38,     # SV Werder Bremen (Legacy)
-    116009: 1,     # Arsenal (Authentic)
-    50473: 1,     # Arsenal (Legacy)
-    116010: 5,     # Chelsea (Authentic)
-    50474: 5,     # Chelsea (Legacy)
-    116011: 18,     # Spurs (Authentic)
-    50475: 18,     # Spurs (Legacy)
-    116013: 1808,     # Brighton (Authentic)
-    50477: 1808,     # Brighton (Legacy)
-    116014: 19,     # West Ham (Authentic)
-    50478: 19,     # West Ham (Legacy)
-    116015: 2,     # Aston Villa (Authentic)
-    50479: 2,     # Aston Villa (Legacy)
-    116016: 7,     # Everton (Authentic)
-    50480: 7,     # Everton (Legacy)
-    116017: 10,     # Manchester City (Authentic)
-    50481: 10,     # Manchester City (Legacy)
-    116020: 95,     # Leicester City (Authentic)
-    50484: 95,     # Leicester City (Legacy)
-    116021: 46636,     # RB Leipzig (Authentic)
-    50485: 46636,     # RB Leipzig (Legacy)
-    116033: 66,     # OL (Authentic)
-    50497: 66,     # OL (Legacy)
-    116034: 73,     # Paris SG (Authentic)
-    50498: 73,     # Paris SG (Legacy)
-    116035: 46281,     # Paris FC (Authentic)
-    50499: 46281,     # Paris FC (Legacy)
-    116037: 70,     # Montpellier (Authentic)
-    50501: 70,     # Montpellier (Legacy)
-    116040: 379,     # Stade de Reims (Authentic)
+    # Authentic Frostbite IDs from FIFA DB v8 kISL.DmlS + 1
+    116003: 1,      # Arsenal (Women) -> Arsenal
+    116004: 5,      # Chelsea (Women) -> Chelsea
+    116005: 18,     # Spurs (Women) -> Spurs
+    116009: 11,     # Manchester Utd (Women) -> Man Utd
+    116010: 1808,   # Brighton (Women) -> Brighton
+    116011: 19,     # West Ham (Women) -> West Ham
+    116012: 2,      # Aston Villa (Women) -> Aston Villa
+    116013: 7,      # Everton (Women) -> Everton
+    116014: 10,     # Manchester City (Women) -> Manchester City
+    116015: 95,     # Leicester City (Women) -> Leicester City
+    116016: 112172, # RB Leipzig (Women) -> RB Leipzig
+    116017: 66,     # OL (Women) -> OL
+    116020: 73,     # Paris SG (Women) -> Paris SG
+    116021: 111817, # Paris FC (Women) -> Paris FC
+    116034: 70,     # Montpellier (Women) -> Montpellier
+    116036: 379,    # Stade de Reims (Women) -> Stade de Reims
+    116037: 62,     # En Avant Guingamp (Women) -> En Avant Guingamp
+    116039: 1819,   # AS Saint Étienne (Women) -> Saint-Étienne
+    116040: 45,     # Juventus (Women) -> Juventus
+    116310: 241,    # FC Barcelona (Women) -> FC Barcelona
+    116311: 243,    # Real Madrid CF (Women) -> Real Madrid
+    116312: 240,    # Atlético de Madrid (Women) -> Atlético de Madrid
+    116325: 448,    # Athletic Club (Women) -> Athletic Club
+    116326: 449,    # Real Betis (Women) -> Real Betis
+    116327: 467,    # SD Eibar (Women) -> SD Eibar
+    116330: 1853,   # Levante UD (Women) -> Levante UD
+    116332: 457,    # Real Sociedad (Women) -> Real Sociedad
+    116333: 481,    # Sevilla FC (Women) -> Sevilla FC
+    116334: 461,    # Valencia CF (Women) -> Valencia CF
+    116336: 9,      # Liverpool (Women) -> Liverpool
+    115841: 21,     # FC Bayern München (Women) -> FC Bayern München
+    115845: 32,     # Leverkusen (Women) -> Leverkusen
+    115891: 1824,   # Frankfurt (Women) -> Frankfurt
+    115995: 175,    # VfL Wolfsburg (Women) -> VfL Wolfsburg
+    115996: 10029,  # TSG Hoffenheim (Women) -> TSG Hoffenheim
+    115999: 25,     # SC Freiburg (Women) -> SC Freiburg
+    116000: 31,     # 1. FC Köln (Women) -> 1. FC Köln
+    116001: 38,     # SV Werder Bremen (Women) -> SV Werder Bremen
+    111325: 1891,   # Nacional (Women) -> Nacional
+    112615: 101085, # Racing Club (Women) -> Racing Club
+    113002: 1318,   # England (Women) -> England
+    113003: 1335,   # France (Women) -> France
+    113004: 1337,   # Germany (Women) -> Germany
+    113007: 1352,   # Norway (Women) -> Norway
+    113008: 1363,   # Sweden (Women) -> Sweden
+    113009: 1387,   # United States (Women) -> United States
+    113010: 1386,   # Mexico (Women) -> Mexico
+    113011: 105035, # Netherlands (Women) -> Netherlands
+    113012: 1362,   # Spain (Women) -> Spain
+    113973: 1359,   # Scotland (Women) -> Scotland
+    113974: 1369,   # Argentina (Women) -> Argentina
+    115486: 1354,   # Portugal (Women) -> Portugal
+    116343: 1738,   # Havre AC (Women) -> Havre AC
+    116360: 71,     # FC Nantes (Women) -> FC Nantes
+    116361: 1341,   # Iceland (Women) -> Iceland
+    116417: 1334,   # Finland (Women) -> Finland
+    131125: 234,    # SL Benfica (Women) -> SL Benfica
+    131159: 245,    # Ajax (Women) -> Ajax
+    131173: 266,    # Slavia Praha (Women) -> Slavia Praha
+    131174: 894,    # FC Zürich (Women) -> FC Zürich
+    131359: 111592, # Free Agents (Women) -> Free Agents
+    131361: 110832, # Granada CF (Women) -> Granada CF
+    131524: 242,    # RC Deportivo (Women) -> RC Deportivo
+    131527: 76,     # Strasbourg (Women) -> Strasbourg
+    131680: 1799,   # Crystal Palace (Women) -> Crystal Palace
+    131681: 452,    # RCD Espanyol (Women) -> RCD Espanyol
+
+    # Legacy 2-byte truncated IDs for backwards compatibility with older tools
+    50473: 1,       # Arsenal (Legacy)
+    50474: 5,       # Chelsea (Legacy)
+    50475: 18,      # Spurs (Legacy)
+    50476: 11,      # Man Utd (Legacy)
+    50477: 1808,    # Brighton (Legacy)
+    50478: 19,      # West Ham (Legacy)
+    50479: 2,       # Aston Villa (Legacy)
+    50480: 7,       # Everton (Legacy)
+    50481: 10,      # Manchester City (Legacy)
+    50484: 95,      # Leicester City (Legacy)
+    50485: 46636,   # RB Leipzig (Legacy)
+    50497: 66,      # OL (Legacy)
+    50498: 73,      # Paris SG (Legacy)
+    50499: 46281,   # Paris FC (Legacy)
+    50501: 70,      # Montpellier (Legacy)
+    50503: 1819,    # Saint Étienne (Legacy)
     50504: 379,     # Stade de Reims (Legacy)
-    116042: 62,     # En Avant Guingamp (Authentic)
-    50506: 62,     # En Avant Guingamp (Legacy)
-    116280: 45,     # Juventus (Authentic)
-    50744: 45,     # Juventus (Legacy)
-    116325: 241,     # FC Barcelona (Authentic)
+    50506: 62,      # En Avant Guingamp (Legacy)
+    50744: 45,      # Juventus (Legacy)
     50789: 241,     # FC Barcelona (Legacy)
-    116327: 240,     # Atlético de Madrid (Authentic)
+    50790: 243,     # Real Madrid CF (Legacy)
     50791: 240,     # Atlético de Madrid (Legacy)
-    116328: 448,     # Athletic Club (Authentic)
     50792: 448,     # Athletic Club (Legacy)
-    116330: 449,     # Real Betis (Authentic)
     50794: 449,     # Real Betis (Legacy)
-    116331: 467,     # SD Eibar (Authentic)
     50795: 467,     # SD Eibar (Legacy)
-    116333: 1853,     # Levante UD (Authentic)
-    50797: 1853,     # Levante UD (Legacy)
-    116336: 457,     # Real Sociedad (Authentic)
+    50797: 1853,    # Levante UD (Legacy)
     50800: 457,     # Real Sociedad (Legacy)
-    116337: 481,     # Sevilla FC (Authentic)
     50801: 481,     # Sevilla FC (Legacy)
-    116339: 461,     # Valencia CF (Authentic)
     50803: 461,     # Valencia CF (Legacy)
-    116343: 9,     # Liverpool (Authentic)
-    50807: 9,     # Liverpool (Legacy)
-    116416: 1738,     # Havre AC (Authentic)
-    50880: 1738,     # Havre AC (Legacy)
-    116417: 71,     # FC Nantes (Authentic)
-    50881: 71,     # FC Nantes (Legacy)
-    116428: 1341,     # Iceland (Authentic)
-    50892: 1341,     # Iceland (Legacy)
+    50807: 9,       # Liverpool (Legacy)
+    50880: 1738,    # Havre AC (Legacy)
+    50881: 71,      # FC Nantes (Legacy)
+    50892: 1341,    # Iceland (Legacy)
+    52: 1334,       # Finland (Legacy)
+    286: 234,       # SL Benfica (Legacy)
+    287: 245,       # Ajax (Legacy)
+    288: 266,       # Slavia Praha (Legacy)
+    289: 894,       # FC Zürich (Legacy)
+    296: 46056,     # Free Agents (Legacy)
+    319: 45296,     # Granada CF (Legacy)
+    648: 242,       # RC Deportivo (Legacy)
+    652: 76,        # Strasbourg (Legacy)
+    653: 1799,      # Crystal Palace (Legacy)
+    661: 452,       # RCD Espanyol (Legacy)
+    45789: 1891,    # Nacional (Legacy)
+    47079: 35549,   # Racing Club (Legacy)
+    47466: 1318,    # England (Legacy)
+    47467: 1335,    # France (Legacy)
+    47468: 1337,    # Germany (Legacy)
+    47471: 1352,    # Norway (Legacy)
+    47472: 1363,    # Sweden (Legacy)
+    47473: 1387,    # United States (Legacy)
+    47474: 1386,    # Mexico (Legacy)
+    47475: 39499,   # Netherlands (Legacy)
+    47476: 1362,    # Spain (Legacy)
+    48448: 1359,    # Scotland (Legacy)
+    48460: 1369,    # Argentina (Legacy)
+    50146: 1354,    # Portugal (Legacy)
+    50459: 21,      # FC Bayern München (Legacy)
+    50460: 32,      # Leverkusen (Legacy)
+    50461: 1824,    # Frankfurt (Legacy)
+    50462: 175,     # VfL Wolfsburg (Legacy)
+    50463: 10029,   # TSG Hoffenheim (Legacy)
+    50466: 25,      # SC Freiburg (Legacy)
+    50467: 31,      # 1. FC Köln (Legacy)
+    50468: 38,      # SV Werder Bremen (Legacy)
 }
 
 # Reverse mapping: Primary/Men's Team ID -> Secondary/Women's Team ID
 PRIMARY_TO_SECONDARY_TEAMS: Dict[int, int] = {v: k for k, v in SECONDARY_TO_PRIMARY_TEAMS.items()}
 
-# Set of all Secondary/Women's Team IDs
+# Set of all Secondary/Women's Team IDs that have a parent club
 SECONDARY_TEAM_IDS: Set[int] = set(SECONDARY_TO_PRIMARY_TEAMS.keys())
 
 # Standalone women's clubs (do not have a men's duplicate in lyxL)
 STANDALONE_WOMEN_TEAMS: Set[int] = {
-    131362,  # FC Rosengård (Authentic)
-    290,  # FC Rosengård (Legacy)
-    131363,  # Glasgow City FC (Authentic)
-    291,  # Glasgow City FC (Legacy)
-    131477,  # Bay FC (Authentic)
-    405,  # Bay FC (Legacy)
-    131478,  # Utah Royals FC (Authentic)
-    406,  # Utah Royals FC (Legacy)
-    116000,  # Turbine Potsdam (Authentic)
-    50464,  # Turbine Potsdam (Legacy)
-    116001,  # SGS Essen (Authentic)
-    50465,  # SGS Essen (Legacy)
-    116005,  # Carl Zeiss Jena (Authentic)
-    50469,  # Carl Zeiss Jena (Legacy)
-    116012,  # Manchester Utd (Authentic)
-    50476,  # Manchester Utd (Legacy)
-    116036,  # FC Fleury 91 (Authentic)
-    50500,  # FC Fleury 91 (Legacy)
-    116039,  # Dijon FCO (Authentic)
-    50503,  # Dijon FCO (Legacy)
-    116282,  # Roma (Authentic)
-    50746,  # Roma (Legacy)
-    116300,  # Seattle Reign (Authentic)
-    50764,  # Seattle Reign (Legacy)
-    116302,  # Portland Thorns (Authentic)
-    50766,  # Portland Thorns (Legacy)
-    116303,  # NC Courage (Authentic)
-    50767,  # NC Courage (Legacy)
-    116304,  # Washington Spirit (Authentic)
-    50768,  # Washington Spirit (Legacy)
-    116305,  # Chicago Stars FC (Authentic)
-    50769,  # Chicago Stars FC (Legacy)
-    116306,  # Houston Dash (Authentic)
-    50770,  # Houston Dash (Legacy)
-    116307,  # Orlando Pride (Authentic)
-    50771,  # Orlando Pride (Legacy)
-    116308,  # Rac. Louisville (Authentic)
-    50772,  # Rac. Louisville (Legacy)
-    116309,  # KC Current (Authentic)
-    50773,  # KC Current (Legacy)
-    116310,  # NJ/NY Gotham (Authentic)
-    50774,  # NJ/NY Gotham (Legacy)
-    116311,  # Angel City FC (Authentic)
-    50775,  # Angel City FC (Legacy)
-    116312,  # San Diego Wave (Authentic)
-    50776,  # San Diego Wave (Legacy)
-    116326,  # Real Madrid CF (Authentic)
-    50790,  # Real Madrid CF (Legacy)
-    116332,  # UD Tenerife (Authentic)
-    50796,  # UD Tenerife (Legacy)
-    116334,  # Madrid CFF (Authentic)
-    50798,  # Madrid CFF (Legacy)
+    52,      # AS Roma (Women)
+    115997,  # Turbine Potsdam
+    115998,  # SGS Essen
+    116002,  # Carl Zeiss Jena
+    116033,  # FC Fleury 91
+    116035,  # Dijon FCO
+    116042,  # Roma (Women)
+    116044,  # Seattle Reign
+    116280,  # Portland Thorns
+    116282,  # NC Courage
+    116300,  # Washington Spirit
+    116302,  # Chicago Stars FC
+    116303,  # Houston Dash
+    116304,  # Orlando Pride
+    116305,  # Rac. Louisville
+    116306,  # KC Current
+    116307,  # NJ/NY Gotham
+    116308,  # Angel City FC
+    116309,  # San Diego Wave
+    116328,  # UD Tenerife
+    116331,  # Madrid CFF
+    116428,  # Levante Badalona
+    131358,  # Glasgow City FC
+    131362,  # FC Rosengård
+    131477,  # Bay FC
+    131478,  # Utah Royals FC
+    # Legacy IDs
+    290,     # FC Rosengård (Legacy)
+    291,     # Glasgow City FC (Legacy)
+    405,     # Bay FC (Legacy)
+    406,     # Utah Royals FC (Legacy)
+    50464,   # Turbine Potsdam (Legacy)
+    50465,   # SGS Essen (Legacy)
+    50469,   # Carl Zeiss Jena (Legacy)
+    50500,   # FC Fleury 91 (Legacy)
+    50746,   # Roma (Legacy)
+    50764,   # Seattle Reign (Legacy)
+    50766,   # Portland Thorns (Legacy)
+    50767,   # NC Courage (Legacy)
+    50768,   # Washington Spirit (Legacy)
+    50769,   # Chicago Stars FC (Legacy)
+    50770,   # Houston Dash (Legacy)
+    50771,   # Orlando Pride (Legacy)
+    50772,   # Rac. Louisville (Legacy)
+    50773,   # KC Current (Legacy)
+    50774,   # NJ/NY Gotham (Legacy)
+    50775,   # Angel City FC (Legacy)
+    50776,   # San Diego Wave (Legacy)
+    50796,   # UD Tenerife (Legacy)
+    50798,   # Madrid CFF (Legacy)
 }
 
 ALL_WOMEN_TEAM_IDS: Set[int] = SECONDARY_TEAM_IDS | STANDALONE_WOMEN_TEAMS
@@ -209,13 +216,8 @@ def get_parent_club_id(team_id: int) -> int:
 
 
 def is_women_team(team_id: int, row_index: int = -1) -> bool:
-    """Returns True if the team is a women's team."""
-    if team_id in ALL_WOMEN_TEAM_IDS:
-        return True
-    # Rows 628..638 (national women) and 690..756 (club women) in table lyxL
-    if 630 <= row_index <= 638 or 690 <= row_index <= 756:
-        return True
-    return False
+    """Returns True if the team is an authentic women's team."""
+    return team_id in ALL_WOMEN_TEAM_IDS
 
 
 def format_team_display_name(team_id: int, base_name: str, row_index: int = -1) -> str:
@@ -230,11 +232,7 @@ def format_team_display_name(team_id: int, base_name: str, row_index: int = -1) 
     if "(Women)" in clean_name or "Women" in clean_name or "Femení" in clean_name or "Féminin" in clean_name:
         return clean_name
 
-    if team_id in SECONDARY_TEAM_IDS or (team_id in ALL_WOMEN_TEAM_IDS and "FC" not in clean_name and "City" not in clean_name):
-        return f"{clean_name} (Women)"
-        
-    # National women's teams in rows 630..638
-    if 630 <= row_index <= 638 or team_id in [113002, 113003, 113004, 113007, 113008, 113009, 113010, 113011, 113012, 113984, 113996, 115682, 131124, 116428, 47466, 47467, 47468, 47471, 47472, 47473, 47474, 47475, 47476]:
+    if is_women_team(team_id, row_index):
         return f"{clean_name} (Women)"
 
     return clean_name

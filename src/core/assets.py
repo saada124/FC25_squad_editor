@@ -347,23 +347,45 @@ class AssetManager:
                 return
             self.download_queue.add(team_id)
 
+        parent_id = get_parent_club_id(team_id)
+
         def _worker():
-            url = f"https://cdn.futbin.com/content/fifa25/img/clubs/{team_id}.png"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=4) as resp:
-                    if resp.status == 200:
-                        content = resp.read()
-                        with open(local_path, "wb") as f:
-                            f.write(content)
-                        # Queue for safe main-thread texture registration
-                        self.pending_textures_queue.put(("club", team_id, local_path, tag))
-            except Exception:
-                pass
-            finally:
-                with self.lock:
-                    self.download_queue.discard(team_id)
+            dl_id = parent_id if (parent_id > 0 and parent_id != team_id and team_id >= 100000) else team_id
+            urls = [
+                f"https://cdn.futwiz.com/assets/img/fc25/badges/{dl_id}.png",
+                f"https://cdn.futbin.com/content/fifa25/img/clubs/{dl_id}.png",
+                f"https://cdn.futwiz.com/assets/img/fc24/badges/{dl_id}.png",
+                f"https://cdn.futwiz.com/assets/img/fifa23/badges/{dl_id}.png",
+            ]
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            content = None
+            for url in urls:
+                try:
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        if resp.status == 200:
+                            data = resp.read()
+                            if len(data) > 500:
+                                content = data
+                                break
+                except Exception:
+                    continue
+
+            if content:
+                try:
+                    with open(local_path, "wb") as f:
+                        f.write(content)
+                    if parent_id > 0 and parent_id != team_id:
+                        parent_path = os.path.join(self.crests_dir, f"c{parent_id}.png")
+                        if not os.path.exists(parent_path):
+                            with open(parent_path, "wb") as f:
+                                f.write(content)
+                    # Queue for safe main-thread texture registration
+                    self.pending_textures_queue.put(("club", team_id, local_path, tag))
+                except Exception:
+                    pass
+            with self.lock:
+                self.download_queue.discard(team_id)
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()

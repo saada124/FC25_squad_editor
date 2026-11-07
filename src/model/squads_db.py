@@ -239,15 +239,25 @@ class SquadsSession:
             self.filepath = filepath
             self.is_loaded = True
             
-            # 3. Populate all 808 real team names from table lyxL
+            # 3. Populate all 816 real team names from table lyxL & kISL
             lyxl = self.db.tables_map.get("lyxL")
+            kisl = self.db.tables_map.get("kISL")
+            col_dmls = kisl.columns_map.get("DmlS") if kisl else None
             if lyxl and "IOSv" in lyxl.columns_map:
                 col_tname = lyxl.columns_map["IOSv"]
                 for r_idx, rec in enumerate(lyxl.records):
-                    tid = int.from_bytes(rec[:4], "little") & 0x7FFFFFFF
                     tname = col_tname.decode_value(rec)
-                    if tid > 0 and tname:
-                        TEAM_NAMES[tid] = format_team_display_name(tid, tname, r_idx)
+                    if not tname:
+                        continue
+                    tid = 0
+                    if col_dmls and r_idx < len(kisl.records):
+                        try:
+                            tid = col_dmls.decode_value(kisl.records[r_idx]) + 1
+                        except Exception:
+                            tid = 0
+                    if tid <= 0:
+                        tid = r_idx + 1
+                    TEAM_NAMES[tid] = format_team_display_name(tid, tname, r_idx)
 
             # 4. Index high-level entities
             self._build_indexes()
@@ -319,25 +329,6 @@ class SquadsSession:
                     pid = get_bits(rec, 18, 18)
                     if pid > 0:
                         risb_player_rows[pid] = r_idx
-                        tid = get_bits(rec, 0, 18)
-                        self.user_transfers[pid] = tid
-                        custom_jersey = get_bits(rec, 36, 7)
-                        if 1 <= custom_jersey <= 99:
-                            self.player_jerseys[pid] = custom_jersey
-                            self.user_jerseys[pid] = custom_jersey
-                        # Ensure player exists in players_lookup if created or not in cards.csv
-                        if pid not in self.players_lookup:
-                            c_name = get_team_name(tid) if tid > 0 else "Free Agent"
-                            self.players_lookup[pid] = {
-                                "playerid": pid,
-                                "name": f"Player #{pid}",
-                                "overall": 65,
-                                "potential": 65,
-                                "pos_code": 14,
-                                "teamid": tid,
-                                "club": c_name,
-                                "stats": {"jerseynumber": str(custom_jersey) if 1 <= custom_jersey <= 99 else "0"}
-                            }
                 except Exception:
                     pass
 
@@ -450,20 +441,31 @@ class SquadsSession:
         for idx, p in enumerate(self.players_cache):
             p["cache_index"] = idx
 
-        # 4. Build Teams Cache from lyxL (all 808 authentic clubs with real stadiums and managers)
+        # 4. Build Teams Cache from lyxL & kISL (all 816 authentic clubs with real stadiums and managers)
         lyxl = self.db.tables_map.get("lyxL")
         knen = self.db.tables_map.get("Knen")
+        kisl = self.db.tables_map.get("kISL")
+        col_dmls = kisl.columns_map.get("DmlS") if kisl else None
         indexed_teams = set()
 
         if lyxl and "IOSv" in lyxl.columns_map:
             col_tname = lyxl.columns_map["IOSv"]
             for r_idx, rec in enumerate(lyxl.records):
                 try:
-                    tid = int.from_bytes(rec[:4], "little") & 0x7FFFFFFF
                     tname = col_tname.decode_value(rec)
-                    if tid > 0 and tname and tid not in indexed_teams:
+                    if not tname:
+                        continue
+                    tid = 0
+                    if col_dmls and r_idx < len(kisl.records):
+                        try:
+                            tid = col_dmls.decode_value(kisl.records[r_idx]) + 1
+                        except Exception:
+                            tid = 0
+                    if tid <= 0:
+                        tid = r_idx + 1
+                    if tid > 0 and tid not in indexed_teams:
                         formatted_name = format_team_display_name(tid, tname, r_idx)
-                        roster = self.team_rosters.get(tid, [])
+                        roster = list(self.team_rosters.get(tid, []))
                         stadium_name = stadium_names.get(r_idx) or f"{formatted_name} Stadium"
                         
                         # Authentic manager lookup from Knen (1:1 correspondence with lyxL)
@@ -478,7 +480,7 @@ class SquadsSession:
                             if "tFVQ" in knen.columns_map:
                                 mgr_asset_id = knen.columns_map["tFVQ"].decode_value(rec_k)
 
-                        if not mgr_name and is_women_team(tid, r_idx):
+                        if not mgr_name:
                             mgr_name = "Head Coach"
 
                         self.teams_cache.append({

@@ -90,9 +90,12 @@ class SquadEditorApp:
                     if dpg.does_item_exist("roster_player_miniface_img"):
                         dpg.configure_item("roster_player_miniface_img", texture_tag=tag)
             elif asset_type == "club":
-                if self.selected_team and self.selected_team.get("teamid") == id_val:
-                    if dpg.does_item_exist("team_crest_img"):
-                        dpg.configure_item("team_crest_img", texture_tag=tag)
+                if self.selected_team:
+                    cur_tid = self.selected_team.get("teamid", 0)
+                    cur_parent = get_parent_club_id(cur_tid)
+                    if cur_tid == id_val or cur_parent == id_val:
+                        if dpg.does_item_exist("team_crest_img"):
+                            dpg.configure_item("team_crest_img", texture_tag=tag)
         except Exception:
             pass
 
@@ -1456,7 +1459,7 @@ class SquadEditorApp:
         self.filtered_players = filtered
         items = []
         for p in self.filtered_players:
-            is_trans = p.get("playerid") in self.session.user_transfers or p.get("risb_row_idx") is not None
+            is_trans = p.get("playerid") in self.session.user_transfers
             badge = " [T]" if is_trans else ""
             items.append(f"[{p['overall']}] {p['name']} ({p['position']}) - {p['club']}{badge}")
         if dpg.does_item_exist("players_listbox"):
@@ -1578,7 +1581,7 @@ class SquadEditorApp:
         p = self.selected_player
         pid = p["playerid"]
         jersey_num = self.session.get_player_jersey_number(pid)
-        is_trans = pid in self.session.user_transfers or p.get("risb_row_idx") is not None
+        is_trans = pid in self.session.user_transfers
         trans_tag = " [TRANSFERRED]" if is_trans else ""
         dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
         dpg.set_value("player_sub_header", f"Club: {p['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {p.get('position', 'None')}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}*  |  Weak Foot: {p.get('weak_foot', 3)}*")
@@ -1739,7 +1742,7 @@ class SquadEditorApp:
 
             jersey_num = self.session.get_player_jersey_number(pid)
             dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
-            is_trans = pid in self.session.user_transfers or p.get("risb_row_idx") is not None
+            is_trans = pid in self.session.user_transfers
             trans_tag = " [TRANSFERRED]" if is_trans else ""
             dpg.set_value("player_sub_header", f"Club: {p['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {p['position']}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}*  |  Weak Foot: {p.get('weak_foot', 3)}*")
 
@@ -1905,7 +1908,7 @@ class SquadEditorApp:
         self.selected_player["teamid"] = target_tid
         
         jersey_num = self.session.get_player_jersey_number(pid)
-        is_trans = pid in self.session.user_transfers or self.selected_player.get("risb_row_idx") is not None
+        is_trans = pid in self.session.user_transfers
         trans_tag = " [TRANSFERRED]" if is_trans else ""
         
         dpg.set_value("player_header_name", f"#{jersey_num} {self.selected_player['name']} (ID: {pid})")
@@ -2200,7 +2203,7 @@ class SquadEditorApp:
         roster_items = []
         for pid in t.get("roster", []):
             jersey = self.session.get_player_jersey_number(pid)
-            is_trans = pid in self.session.user_transfers or (self.session.players_lookup.get(pid, {}).get("risb_row_idx") is not None)
+            is_trans = pid in self.session.user_transfers
             trans_tag = " [T]" if is_trans else ""
             if pid in self.session.players_lookup:
                 p = self.session.players_lookup[pid]
