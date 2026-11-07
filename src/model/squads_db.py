@@ -9,12 +9,14 @@ try:
     from core.db_codec import FIFADatabase, DBTable, DBColumn, get_bits, set_bits
     from core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
     from core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
+    from core.change_tracker import ChangeTracker, ChangeEntry
 except ImportError:
     from src.core.backup import create_load_backup, list_folder_backups
     from src.core.fbchunks import FBChunksContainer
     from src.core.db_codec import FIFADatabase, DBTable, DBColumn, get_bits, set_bits
     from src.core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
     from src.core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
+    from src.core.change_tracker import ChangeTracker, ChangeEntry
 
 def get_base_dir() -> str:
     """Returns application directory whether running as script or frozen PyInstaller exe."""
@@ -50,6 +52,7 @@ class SquadsSession:
         self.user_jerseys: Dict[int, int] = {}
         self.base_team_lookup: Dict[int, int] = {}
         self.base_jersey_lookup: Dict[int, int] = {}
+        self.change_tracker: ChangeTracker = ChangeTracker()
 
         # Pre-load player presets from Live Editor database
         self._load_player_presets()
@@ -248,6 +251,7 @@ class SquadsSession:
 
             # 4. Index high-level entities
             self._build_indexes()
+            self.change_tracker.clear()
             
             status = f"Loaded {len(self.db.tables)} tables. {backup_msg}"
             return True, status
@@ -269,6 +273,7 @@ class SquadsSession:
             rebuilt_db = self.db.serialize()
             total_written = self.container.repack(rebuilt_db, save_path)
             self.filepath = save_path
+            self.change_tracker.clear()
             return True, f"Successfully exported {total_written:,} bytes to: {os.path.basename(save_path)}"
         except Exception as e:
             return False, f"Export failed: {str(e)}"
@@ -342,6 +347,8 @@ class SquadsSession:
             if pid in self.user_transfers:
                 tid = self.user_transfers[pid]
                 club_name = get_team_name(tid) if tid > 0 else "Free Agent"
+                pdata["teamid"] = tid
+                pdata["club"] = club_name
             else:
                 tid = pdata.get("teamid", 0)
                 club_name = pdata.get("club") or (get_team_name(tid) if tid > 0 else "Free Agent")
@@ -492,8 +499,13 @@ class SquadsSession:
         # Sort teams by roster size (top active teams first) then alphabetically
         self.teams_cache.sort(key=lambda t: (t["roster_count"] > 0, t["roster_count"], t["name"]), reverse=True)
 
-    def update_player_attribute(self, player_id: int, attr_key: str, new_val: Any) -> bool:
+    def update_player_attribute(self, player_id: int, attr_key: str, new_val: Any, track: bool = True) -> bool:
         """Updates a player's attribute in memory cache and directly into the active database records."""
+        pl = self.players_lookup.get(player_id, {})
+        old_val = pl.get("stats", {}).get(attr_key)
+        if old_val is None:
+            old_val = pl.get(attr_key, "")
+
         # Synchronize players_lookup
         if player_id in self.players_lookup:
             pl = self.players_lookup[player_id]
@@ -531,7 +543,7 @@ class SquadsSession:
                     p["club"] = get_team_name(int(new_val))
                 elif attr_key == "jerseynumber":
                     try:
-                        self.set_player_jersey_number(player_id, int(new_val))
+                        self.set_player_jersey_number(player_id, int(new_val), track=False)
                     except Exception:
                         pass
 
@@ -585,12 +597,28 @@ class SquadsSession:
 
                 # Update team transfer in rIsB table:
                 if attr_key == "teamid":
-                    self.transfer_player(player_id, int(new_val))
+                    self.transfer_player(player_id, int(new_val), track=False)
+
+                if track and old_val is not None and str(old_val).strip() != str(new_val).strip():
+                    pname = pl.get("name", f"Player #{player_id}")
+                    disp_label = get_column_display_name(attr_key)
+                    if "(" in disp_label:
+                        disp_label = disp_label.split(" (")[0]
+                    self.change_tracker.record_change(
+                        category="player",
+                        title=f"{pname} (ID {player_id})",
+                        entity_id=player_id,
+                        field_name=attr_key,
+                        field_label=disp_label or attr_key.capitalize(),
+                        old_val=old_val,
+                        new_val=new_val,
+                        revert_fn=lambda pid=player_id, k=attr_key, ov=old_val: self.update_player_attribute(pid, k, ov, track=False)
+                    )
 
                 return True
         return False
 
-    def transfer_player(self, player_id: int, new_team_id: int, jersey_number: Optional[int] = None) -> bool:
+    def transfer_player(self, player_id: int, new_team_id: int, jersey_number: Optional[int] = None, track: bool = True) -> bool:
         """
         Transfers player to a new team in active squad database and updates rosters and rIsB bitfields.
         Handles destination translation, jersey collision resolution, and clean revert.
@@ -598,13 +626,24 @@ class SquadsSession:
         target_tid = new_team_id
         if target_tid in SECONDARY_TO_PRIMARY_TEAMS and target_tid < 65536:
             target_tid = SECONDARY_TO_PRIMARY_TEAMS[target_tid]
-        self.user_transfers[player_id] = target_tid
-        club_name = get_team_name(target_tid) if target_tid > 0 else "Free Agent"
 
         # Determine authentic base club of player from lookup
         p_lookup = self.players_lookup.get(player_id, {})
         base_tid = p_lookup.get("base_teamid") or self.base_team_lookup.get(player_id, p_lookup.get("teamid", 0))
         base_jersey = p_lookup.get("base_jersey") or self.base_jersey_lookup.get(player_id, int(p_lookup.get("stats", {}).get("jerseynumber", 0) or 0))
+
+        old_team_id = 0
+        for p in self.players_cache:
+            if p["playerid"] == player_id:
+                old_team_id = p["teamid"]
+                break
+        if old_team_id == 0:
+            old_team_id = p_lookup.get("teamid", 0)
+        old_jersey = self.get_player_jersey_number(player_id)
+        old_team_name = get_team_name(old_team_id) if old_team_id > 0 else "Free Agent"
+
+        self.user_transfers[player_id] = target_tid
+        club_name = get_team_name(target_tid) if target_tid > 0 else "Free Agent"
 
         if player_id in self.players_lookup:
             if "base_teamid" not in self.players_lookup[player_id]:
@@ -639,7 +678,6 @@ class SquadsSession:
                         t["roster_count"] = len(t["roster"])
 
                 # Resolve Jersey Number & Collisions
-                base_jersey = int(p_lookup.get("stats", {}).get("jerseynumber", 0) or 0)
                 target_jersey = jersey_number
                 if target_jersey is None:
                     if target_tid == base_tid and base_jersey > 0:
@@ -712,6 +750,21 @@ class SquadsSession:
                                 risb.records.append(new_rec)
                                 risb.written_records = len(risb.records)
                                 p["risb_row_idx"] = len(risb.records) - 1
+
+                if track and (old_team_id != target_tid or (jersey_number is not None and jersey_number != old_jersey)):
+                    pname = p_lookup.get("name", f"Player #{player_id}")
+                    new_team_name = get_team_name(target_tid) if target_tid > 0 else "Free Agent"
+                    new_j = target_jersey if (target_jersey and target_jersey > 0) else old_jersey
+                    self.change_tracker.record_change(
+                        category="transfer",
+                        title=f"{pname} (ID {player_id})",
+                        entity_id=player_id,
+                        field_name="team_transfer",
+                        field_label="Club Transfer",
+                        old_val=f"{old_team_name} (#{old_jersey})",
+                        new_val=f"{new_team_name} (#{new_j})",
+                        revert_fn=lambda pid=player_id, otid=old_team_id, oj=old_jersey: self.transfer_player(pid, otid, jersey_number=oj, track=False)
+                    )
                 return True
         return False
 
@@ -788,10 +841,11 @@ class SquadsSession:
             return 11
         return 10
 
-    def set_player_jersey_number(self, player_id: int, number: int) -> bool:
+    def set_player_jersey_number(self, player_id: int, number: int, track: bool = True) -> bool:
         """Sets squad jersey number (1-99) for a player and persists directly into rIsB and RrqT."""
         if not (1 <= number <= 99):
             return False
+        old_num = self.get_player_jersey_number(player_id)
         self.user_jerseys[player_id] = number
         self.player_jerseys[player_id] = number
         if player_id in self.players_lookup:
@@ -843,41 +897,84 @@ class SquadsSession:
                 if rrqt and r_idx is not None and r_idx < len(rrqt.records):
                     set_bits(rrqt.records[r_idx], 23, 7, number)
                 break
+
+        if track and old_num != number:
+            pl = self.players_lookup.get(player_id, {})
+            pname = pl.get("name", f"Player #{player_id}")
+            self.change_tracker.record_change(
+                category="player",
+                title=f"{pname} (ID {player_id})",
+                entity_id=player_id,
+                field_name="jerseynumber",
+                field_label="Jersey Number",
+                old_val=str(old_num),
+                new_val=str(number),
+                revert_fn=lambda pid=player_id, on=old_num: self.set_player_jersey_number(pid, on, track=False)
+            )
+
         return True
 
-    def update_team_stadium(self, team_id: int, new_stadium_name: str) -> bool:
+    def update_team_stadium(self, team_id: int, new_stadium_name: str, track: bool = True) -> bool:
         """Updates home stadium name for a club in memory and in table kISL."""
         clean_name = new_stadium_name.strip()
         if not clean_name:
             return False
         for t in self.teams_cache:
             if t["teamid"] == team_id:
+                old_stadium = t.get("stadium", "")
                 t["stadium"] = clean_name
                 r_idx = t.get("row_index")
                 if r_idx is not None:
                     kisl = self.db.tables_map.get("kISL")
                     if kisl and r_idx < len(kisl.records):
-                        self.update_table_cell("kISL", r_idx, "fwCQ", clean_name)
+                        self.update_table_cell("kISL", r_idx, "fwCQ", clean_name, track=False)
+                
+                if track and old_stadium != clean_name:
+                    tname = t.get("name", f"Team #{team_id}")
+                    self.change_tracker.record_change(
+                        category="team",
+                        title=f"{tname} (ID {team_id})",
+                        entity_id=team_id,
+                        field_name="stadium",
+                        field_label="Stadium Name",
+                        old_val=old_stadium,
+                        new_val=clean_name,
+                        revert_fn=lambda tid=team_id, os=old_stadium: self.update_team_stadium(tid, os, track=False)
+                    )
                 return True
         return False
 
-    def update_team_manager(self, team_id: int, new_manager_name: str) -> bool:
+    def update_team_manager(self, team_id: int, new_manager_name: str, track: bool = True) -> bool:
         """Updates manager name for a club in memory and in authentic table Knen."""
         clean_name = new_manager_name.strip()
         if not clean_name:
             return False
         for t in self.teams_cache:
             if t["teamid"] == team_id:
+                old_manager = t.get("manager_name", "")
                 t["manager_name"] = clean_name
                 r_idx = t.get("row_index")
                 if r_idx is not None:
                     knen = self.db.tables_map.get("Knen")
                     if knen and r_idx < len(knen.records):
-                        self.update_table_cell("Knen", r_idx, "EveZ", clean_name)
+                        self.update_table_cell("Knen", r_idx, "EveZ", clean_name, track=False)
+                
+                if track and old_manager != clean_name:
+                    tname = t.get("name", f"Team #{team_id}")
+                    self.change_tracker.record_change(
+                        category="team",
+                        title=f"{tname} (ID {team_id})",
+                        entity_id=team_id,
+                        field_name="manager",
+                        field_label="Manager Name",
+                        old_val=old_manager,
+                        new_val=clean_name,
+                        revert_fn=lambda tid=team_id, om=old_manager: self.update_team_manager(tid, om, track=False)
+                    )
                 return True
         return False
 
-    def update_table_cell(self, sname: str, row_idx: int, col_sname: str, new_val: Any) -> bool:
+    def update_table_cell(self, sname: str, row_idx: int, col_sname: str, new_val: Any, track: bool = True) -> bool:
         """Directly writes a value into any column of any record in the active database."""
         tbl = self.db.tables_map.get(sname)
         if not tbl or row_idx >= len(tbl.records):
@@ -888,12 +985,26 @@ class SquadsSession:
             return False
             
         try:
+            old_val = col.decode_value(tbl.records[row_idx])
             col.encode_value(tbl.records[row_idx], new_val)
+            
+            if track and str(old_val).strip() != str(new_val).strip():
+                disp_col = get_column_display_name(col_sname)
+                self.change_tracker.record_change(
+                    category="table",
+                    title=f"Table {sname} [Row {row_idx}]",
+                    entity_id=f"{sname}_{row_idx}_{col_sname}",
+                    field_name=col_sname,
+                    field_label=disp_col or col_sname,
+                    old_val=str(old_val),
+                    new_val=str(new_val),
+                    revert_fn=lambda sn=sname, ri=row_idx, csn=col_sname, ov=old_val: self.update_table_cell(sn, ri, csn, ov, track=False)
+                )
             return True
         except Exception:
             return False
 
-    def clone_table_row(self, sname: str, row_idx: int) -> bool:
+    def clone_table_row(self, sname: str, row_idx: int, track: bool = True) -> bool:
         """Clones an existing row in a database table."""
         tbl = self.db.tables_map.get(sname)
         if not tbl or row_idx >= len(tbl.records):
@@ -901,18 +1012,50 @@ class SquadsSession:
         cloned = bytearray(tbl.records[row_idx])
         tbl.records.append(cloned)
         tbl.written_records = len(tbl.records)
+        new_row_idx = len(tbl.records) - 1
+        if track:
+            self.change_tracker.record_change(
+                category="table",
+                title=f"Table {sname} [Row {new_row_idx}]",
+                entity_id=f"{sname}_{new_row_idx}_clone",
+                field_name="clone_row",
+                field_label="Row Cloned",
+                old_val="None",
+                new_val=f"Cloned from Row #{row_idx}",
+                revert_fn=lambda sn=sname, ri=new_row_idx: self.delete_table_row(sn, ri, track=False)
+            )
         return True
 
-    def delete_table_row(self, sname: str, row_idx: int) -> bool:
+    def delete_table_row(self, sname: str, row_idx: int, track: bool = True) -> bool:
         """Deletes a row from a database table."""
         tbl = self.db.tables_map.get(sname)
         if not tbl or row_idx >= len(tbl.records):
             return False
+        deleted_data = bytearray(tbl.records[row_idx])
         del tbl.records[row_idx]
+        tbl.written_records = len(tbl.records)
+        if track:
+            self.change_tracker.record_change(
+                category="table",
+                title=f"Table {sname} [Row {row_idx}]",
+                entity_id=f"{sname}_{row_idx}_delete",
+                field_name="delete_row",
+                field_label="Row Deleted",
+                old_val="Active Record",
+                new_val="Deleted",
+                revert_fn=lambda sn=sname, ri=row_idx, rec=deleted_data: self._restore_table_row(sn, ri, rec)
+            )
+        return True
+
+    def _restore_table_row(self, sname: str, row_idx: int, record_bytes: bytearray) -> bool:
+        tbl = self.db.tables_map.get(sname)
+        if not tbl:
+            return False
+        tbl.records.insert(row_idx, record_bytes)
         tbl.written_records = len(tbl.records)
         return True
 
-    def add_table_row(self, sname: str) -> bool:
+    def add_table_row(self, sname: str, track: bool = True) -> bool:
         """Adds a new blank row into a database table."""
         tbl = self.db.tables_map.get(sname)
         if not tbl:
@@ -920,6 +1063,18 @@ class SquadsSession:
         new_row = bytearray(tbl.rec_size)
         tbl.records.append(new_row)
         tbl.written_records = len(tbl.records)
+        new_row_idx = len(tbl.records) - 1
+        if track:
+            self.change_tracker.record_change(
+                category="table",
+                title=f"Table {sname} [Row {new_row_idx}]",
+                entity_id=f"{sname}_{new_row_idx}_add",
+                field_name="add_row",
+                field_label="Row Added",
+                old_val="None",
+                new_val="New Record",
+                revert_fn=lambda sn=sname, ri=new_row_idx: self.delete_table_row(sn, ri, track=False)
+            )
         return True
 
     def get_table_names_list(self) -> List[Tuple[str, str, int]]:

@@ -136,6 +136,28 @@ class SquadEditorApp:
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 6)
         dpg.bind_theme(global_theme)
 
+        # Specialized Accent Themes for Save Button, Changes Counter, and Revert
+        with dpg.theme(tag="theme_save_btn_dirty"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (0, 140, 60, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (0, 175, 75, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (0, 205, 90, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
+
+        with dpg.theme(tag="theme_changes_btn_active"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (170, 95, 0, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (210, 120, 0, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (240, 145, 0, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
+
+        with dpg.theme(tag="theme_revert_btn"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (160, 35, 35, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (200, 50, 50, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (230, 70, 70, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
+
     def _build_ui(self):
         self.assets.init_dpg_textures()
         with dpg.window(tag="primary_window", no_title_bar=True, no_move=True, no_resize=True):
@@ -144,7 +166,8 @@ class SquadEditorApp:
                 dpg.add_text("FC 25 SQUAD STUDIO", color=(0, 200, 255))
                 dpg.add_text("|", color=(100, 100, 100))
                 dpg.add_button(label="Open Squads", callback=self._on_click_open)
-                dpg.add_button(label="Save Squads", callback=self._on_click_save)
+                dpg.add_button(label="💾 Save File", tag="btn_primary_save", callback=self._on_click_save)
+                dpg.add_button(label="📋 Changes (0)", tag="btn_review_changes", callback=self._on_open_pending_changes)
                 dpg.add_button(label="Save As...", callback=self._on_click_save_as)
                 dpg.add_spacer(width=20)
                 dpg.add_text("Ready. Please open a Squads save file.", tag="status_text", color=(180, 180, 180))
@@ -208,6 +231,28 @@ class SquadEditorApp:
                     dpg.add_button(label="✅ Complete Transfer & Sign to Club", callback=self._on_confirm_sign_player, width=280)
                     dpg.add_spacer(width=20)
                     dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item("sign_player_modal", show=False), width=100)
+
+            # Review Pending Changes Modal Window
+            with dpg.window(label="📋 Review Pending File Changes", modal=True, show=False, tag="pending_changes_modal", width=820, height=560, no_resize=False):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Session Change Log & Revert Manager", color=(0, 200, 255))
+                    dpg.add_spacer(width=20)
+                    dpg.add_text("", tag="changes_modal_count_badge", color=(255, 200, 0))
+                dpg.add_text("All staged changes in current session. Click red '✖ Revert' to cancel any edit, or 'Save All to File' to persist.", color=(170, 170, 170))
+                dpg.add_separator()
+                
+                with dpg.child_window(height=420, tag="pending_changes_container"):
+                    pass
+                
+                dpg.add_spacer(height=6)
+                dpg.add_separator()
+                dpg.add_spacer(height=6)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="💾 Save All to File", callback=self._on_modal_save_all, width=170)
+                    dpg.add_spacer(width=15)
+                    dpg.add_button(label="🗑️ Discard All Changes", callback=self._on_modal_discard_all, width=180)
+                    dpg.add_spacer(width=280)
+                    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("pending_changes_modal", show=False), width=100)
 
         dpg.set_primary_window("primary_window", True)
 
@@ -770,6 +815,9 @@ class SquadEditorApp:
             self._load_teams_list()
             self._load_database_tables_dropdown()
             self._populate_club_combo()
+            self._update_save_and_changes_toolbar()
+            if dpg.does_item_exist("pending_changes_modal") and dpg.is_item_shown("pending_changes_modal"):
+                self._refresh_pending_changes_modal()
         else:
             dpg.set_value("status_text", f"Error: {msg}")
 
@@ -779,6 +827,9 @@ class SquadEditorApp:
             return
         success, msg = self.session.save_squads_file()
         dpg.set_value("status_text", msg)
+        self._update_save_and_changes_toolbar()
+        if dpg.does_item_exist("pending_changes_modal") and dpg.is_item_shown("pending_changes_modal"):
+            self._refresh_pending_changes_modal()
 
     def _on_click_save_as(self):
         if not self.session.is_loaded:
@@ -797,6 +848,142 @@ class SquadEditorApp:
             return
         success, msg = self.session.save_squads_file(target)
         dpg.set_value("status_text", msg)
+        self._update_save_and_changes_toolbar()
+        if dpg.does_item_exist("pending_changes_modal") and dpg.is_item_shown("pending_changes_modal"):
+            self._refresh_pending_changes_modal()
+
+    def _update_save_and_changes_toolbar(self):
+        """Dynamically updates the unified save button and changes badge in the header toolbar."""
+        tracker = self.session.change_tracker
+        count = tracker.count
+        if count > 0:
+            if dpg.does_item_exist("btn_primary_save"):
+                dpg.configure_item("btn_primary_save", label=f"💾 Save File ({count})*")
+                dpg.bind_item_theme("btn_primary_save", "theme_save_btn_dirty")
+            if dpg.does_item_exist("btn_review_changes"):
+                dpg.configure_item("btn_review_changes", label=f"📋 Changes ({count})*")
+                dpg.bind_item_theme("btn_review_changes", "theme_changes_btn_active")
+        else:
+            if dpg.does_item_exist("btn_primary_save"):
+                dpg.configure_item("btn_primary_save", label="💾 Save File")
+                dpg.bind_item_theme("btn_primary_save", "")
+            if dpg.does_item_exist("btn_review_changes"):
+                dpg.configure_item("btn_review_changes", label="📋 Changes (0)")
+                dpg.bind_item_theme("btn_review_changes", "")
+
+    def _on_open_pending_changes(self):
+        """Opens the review dialog showing all staged session modifications."""
+        self._refresh_pending_changes_modal()
+        dpg.configure_item("pending_changes_modal", show=True)
+
+    def _refresh_pending_changes_modal(self):
+        """Re-renders the pending changes list cards in the review dialog."""
+        if not dpg.does_item_exist("pending_changes_container"):
+            return
+        dpg.delete_item("pending_changes_container", children_only=True)
+        tracker = self.session.change_tracker
+        changes = tracker.get_changes()
+        count = len(changes)
+
+        dpg.set_value("changes_modal_count_badge", f"Total: {count} unpersisted edit{'s' if count != 1 else ''}")
+
+        if count == 0:
+            with dpg.group(parent="pending_changes_container"):
+                dpg.add_spacer(height=60)
+                dpg.add_text("✓ No pending changes.", color=(0, 255, 120))
+                dpg.add_text("The active session is completely in sync with the squad file.", color=(160, 160, 160))
+            return
+
+        category_colors = {
+            "player": (60, 180, 255),      # Cyan
+            "transfer": (255, 170, 0),     # Orange
+            "team": (200, 120, 255),       # Purple
+            "table": (180, 220, 140),      # Soft olive
+        }
+
+        with dpg.group(parent="pending_changes_container"):
+            for idx, c in enumerate(reversed(changes), 1):
+                badge_color = category_colors.get(c.category, (200, 200, 200))
+                with dpg.group(horizontal=True):
+                    dpg.add_text(f"[{c.category.upper()}]", color=badge_color)
+                    dpg.add_text(f"{c.title}", color=(240, 240, 240))
+                    dpg.add_text(f"({c.get_time_str()})", color=(130, 130, 130))
+                    dpg.add_spacer(width=20)
+                    btn = dpg.add_button(
+                        label="✖ Revert",
+                        user_data=c.id,
+                        callback=self._on_revert_single_change_clicked,
+                        width=85
+                    )
+                    dpg.bind_item_theme(btn, "theme_revert_btn")
+
+                with dpg.group(horizontal=True):
+                    dpg.add_spacer(width=20)
+                    dpg.add_text(f"{c.field_label}:", color=(180, 180, 180))
+                    dpg.add_text(f"{c.old_display}", color=(255, 110, 110))
+                    dpg.add_text("➔", color=(255, 255, 255))
+                    dpg.add_text(f"{c.new_display}", color=(100, 255, 140))
+
+                dpg.add_separator()
+
+    def _on_revert_single_change_clicked(self, sender, app_data, user_data):
+        """Handles single change revert when clicking the red '✖ Revert' button."""
+        change_id = user_data
+        if not change_id:
+            return
+        success = self.session.change_tracker.revert(change_id)
+        if success:
+            self._update_save_and_changes_toolbar()
+            self._refresh_pending_changes_modal()
+            self._refresh_views_after_revert()
+            dpg.set_value("status_text", "Reverted edit successfully.")
+
+    def _on_modal_discard_all(self):
+        """Reverts all pending changes in the session, restoring pristine file state."""
+        count = self.session.change_tracker.count
+        if count == 0:
+            return
+        reverted_count = self.session.change_tracker.revert_all()
+        self._update_save_and_changes_toolbar()
+        self._refresh_pending_changes_modal()
+        self._refresh_views_after_revert()
+        dpg.set_value("status_text", f"Discarded all {reverted_count} changes. File is in original state.")
+
+    def _on_modal_save_all(self):
+        """Saves all staged changes to the squads file from inside the modal dialog."""
+        self._on_click_save()
+        if self.session.change_tracker.count == 0:
+            dpg.configure_item("pending_changes_modal", show=False)
+
+    def _refresh_views_after_revert(self):
+        """Synchronizes all UI inspector components with reverted memory state."""
+        # 1. Update active player view if one is selected
+        if self.selected_player:
+            sel_pid = self.selected_player.get("playerid")
+            for p in self.session.players_cache:
+                if p["playerid"] == sel_pid:
+                    self.selected_player = p
+                    self._populate_player_details(p)
+                    break
+        self._on_filter_players()
+
+        # 2. Update active team view if one is selected
+        if self.selected_team:
+            sel_tid = self.selected_team.get("teamid")
+            for t in self.session.teams_cache:
+                if t["teamid"] == sel_tid:
+                    self.selected_team = t
+                    self._populate_team_details(t)
+                    break
+        self._on_filter_teams()
+
+        # 3. Update database table view if one is open
+        if self.selected_table_sname:
+            self._load_db_table(self.selected_table_sname)
+            if self.selected_record_index is not None:
+                tbl = self.session.get_table(self.selected_table_sname)
+                if tbl and self.selected_record_index < len(tbl.records):
+                    self._inspect_record(tbl, self.selected_record_index)
 
     def _update_backups_list(self):
         if self.session.filepath:
@@ -990,6 +1177,9 @@ class SquadEditorApp:
 
         p = self.filtered_players[idx]
         self.selected_player = p
+        self._populate_player_details(p)
+
+    def _populate_player_details(self, p: Dict[str, Any]):
         pid = p["playerid"]
 
         # Set color-coded badge
@@ -1183,6 +1373,7 @@ class SquadEditorApp:
         dpg.set_value("player_save_feedback", f"✓ Transferred player to {club_name} (#{jersey_num})!")
         self._on_filter_players()
         self._on_filter_teams()
+        self._update_save_and_changes_toolbar()
 
     def _on_save_player_changes(self):
         if not self.selected_player:
@@ -1306,8 +1497,10 @@ class SquadEditorApp:
                 self.session.update_player_attribute(pid, stat_key, val)
                 stats[stat_key] = str(val)
 
-        dpg.set_value("player_save_feedback", "✓ Saved player attributes, PlayStyles & appearance successfully!")
         self._on_filter_players()
+        self._update_save_and_changes_toolbar()
+        staged_n = self.session.change_tracker.count
+        dpg.set_value("player_save_feedback", f"✓ Applied player changes ({staged_n} staged). Click '💾 Save File' above to persist.")
 
     def _on_boost_player(self):
         if not self.selected_player:
@@ -1329,7 +1522,9 @@ class SquadEditorApp:
         dpg.set_value("edit_player_weakfoot", 5)
         self._on_all_gold_playstyles()
         self._on_save_player_changes()
-        dpg.set_value("player_save_feedback", "⚡ Prime 99 & All Gold PlayStyles+ Applied!")
+        self._update_save_and_changes_toolbar()
+        staged_n = self.session.change_tracker.count
+        dpg.set_value("player_save_feedback", f"⚡ Prime 99 & All Gold PlayStyles+ Applied ({staged_n} staged)!")
 
     def _on_import_player_face(self):
         """Allows user to select and import a custom miniface image for the selected player."""
@@ -1410,7 +1605,9 @@ class SquadEditorApp:
             return
         t = self.filtered_teams[idx]
         self.selected_team = t
+        self._populate_team_details(t)
 
+    def _populate_team_details(self, t: Dict[str, Any]):
         dpg.set_value("team_selected_header", f"Club: {t['name']} (ID: {t['teamid']})")
         dpg.set_value("edit_team_id", t["teamid"])
         dpg.set_value("edit_team_name", t["name"])
@@ -1496,10 +1693,11 @@ class SquadEditorApp:
         pname = p["name"] if p else f"Player #{pid}"
         
         self._refresh_team_roster_display()
+        self._update_save_and_changes_toolbar()
         if duplicate_name:
             dpg.set_value("team_save_feedback", f"✓ Set #{num} for {pname} (Note: #{num} was also worn by {duplicate_name})")
         else:
-            dpg.set_value("team_save_feedback", f"✓ Set jersey #{num} for {pname}!")
+            dpg.set_value("team_save_feedback", f"✓ Set jersey #{num} for {pname} ({self.session.change_tracker.count} staged)!")
 
     def _on_release_roster_player(self):
         if not self.selected_team_roster_pid or not self.selected_team:
@@ -1529,7 +1727,8 @@ class SquadEditorApp:
         self._refresh_team_roster_display()
         self._on_filter_teams()
         self._on_filter_players()
-        dpg.set_value("team_save_feedback", f"❌ Released {pname} to Free Agents!")
+        self._update_save_and_changes_toolbar()
+        dpg.set_value("team_save_feedback", f"❌ Released {pname} to Free Agents ({self.session.change_tracker.count} staged)!")
 
     def _on_open_sign_player_modal(self):
         if not self.selected_team:
@@ -1625,7 +1824,8 @@ class SquadEditorApp:
         self._refresh_team_roster_display()
         self._on_filter_teams()
         self._on_filter_players()
-        dpg.set_value("team_save_feedback", f"✅ Successfully signed {p['name']} to {tname}!")
+        self._update_save_and_changes_toolbar()
+        dpg.set_value("team_save_feedback", f"✅ Successfully signed {p['name']} to {tname} ({self.session.change_tracker.count} staged)!")
 
     def _on_save_team_changes(self):
         if not self.selected_team:
@@ -1635,8 +1835,9 @@ class SquadEditorApp:
         self.selected_team["name"] = new_name
         self.selected_team["stadium"] = new_stadium
         self.session.update_team_stadium(self.selected_team["teamid"], new_stadium)
-        dpg.set_value("team_save_feedback", "✓ Club details & stadium updated!")
         self._on_filter_teams()
+        self._update_save_and_changes_toolbar()
+        dpg.set_value("team_save_feedback", f"✓ Club details & stadium updated ({self.session.change_tracker.count} staged)!")
 
     def _on_import_club_crest(self):
         """Allows user to select and import a custom club crest image."""
@@ -1702,7 +1903,8 @@ class SquadEditorApp:
         mgr_tex = self.assets.get_manager_texture(tid, m_name)
         if dpg.does_item_exist("team_manager_img"):
             dpg.configure_item("team_manager_img", texture_tag=mgr_tex)
-        dpg.set_value("team_save_feedback", f"✓ Manager details saved in database: {m_name} ({m_nat})")
+        self._update_save_and_changes_toolbar()
+        dpg.set_value("team_save_feedback", f"✓ Manager details updated ({self.session.change_tracker.count} staged): {m_name} ({m_nat})")
 
     # --- Database Editor UI Callbacks ---
 
@@ -1817,7 +2019,8 @@ class SquadEditorApp:
         if tbl and self.selected_record_index is not None:
             self.session.clone_table_row(self.selected_table_sname, self.selected_record_index)
             self._load_db_table(self.selected_table_sname)
-            dpg.set_value("record_save_feedback", f"✓ Cloned row #{self.selected_record_index} to end of table!")
+            self._update_save_and_changes_toolbar()
+            dpg.set_value("record_save_feedback", f"✓ Cloned row #{self.selected_record_index} to end of table ({self.session.change_tracker.count} staged)!")
 
     def _on_click_delete_row(self):
         tbl = self.session.get_table(self.selected_table_sname)
@@ -1841,7 +2044,8 @@ class SquadEditorApp:
         if action == "add":
             self.session.add_table_row(self.selected_table_sname)
             self._load_db_table(self.selected_table_sname)
-            dpg.set_value("record_save_feedback", "✓ New blank row added at end of table!")
+            self._update_save_and_changes_toolbar()
+            dpg.set_value("record_save_feedback", f"✓ New blank row added at end of table ({self.session.change_tracker.count} staged)!")
         elif action == "delete" and self.selected_record_index is not None:
             deleted_idx = self.selected_record_index
             self.session.delete_table_row(self.selected_table_sname, deleted_idx)
@@ -1849,7 +2053,8 @@ class SquadEditorApp:
             self._load_db_table(self.selected_table_sname)
             dpg.delete_item("record_fields_container", children_only=True)
             dpg.configure_item("record_actions_group", show=False)
-            dpg.set_value("record_save_feedback", f"✓ Deleted row #{deleted_idx}!")
+            self._update_save_and_changes_toolbar()
+            dpg.set_value("record_save_feedback", f"✓ Deleted row #{deleted_idx} ({self.session.change_tracker.count} staged)!")
 
     def _on_export_table_csv(self):
         """Exports the active database table to a CSV file."""
@@ -2185,8 +2390,9 @@ class SquadEditorApp:
         for sname, val in parsed_values.items():
             self.session.update_table_cell(self.selected_table_sname, row_idx, sname, val)
 
+        self._update_save_and_changes_toolbar()
         dpg.configure_item("record_save_feedback", color=(0, 255, 120))
-        dpg.set_value("record_save_feedback", f"[OK] Record #{row_idx} saved and verified successfully!")
+        dpg.set_value("record_save_feedback", f"[OK] Record #{row_idx} staged ({self.session.change_tracker.count} changes)! Click '💾 Save File' above to persist.")
         self._render_db_records_page()
 
 def main():
