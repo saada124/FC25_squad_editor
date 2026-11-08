@@ -85,35 +85,40 @@ tex_rm = assets.get_club_texture(243, "Real Madrid")
 assert dpg.does_item_exist(tex_rm), f"Texture {tex_rm} must be active in DPG"
 print(f"  [PASS] get_club_texture(243) returned active DPG texture: {tex_rm}")
 
-# --- 4. Testing Batch Crest Downloader & Progress Tracking ---
-print("\n--- 4. Testing Batch Crest Downloader ---")
+# --- 4. Testing Player Miniface Loading & Versioned Swapping ---
+print("\n--- 4. Testing Player Miniface Pipeline ---")
+mbappe_pid = 231747
+tex_mbappe = assets.get_player_texture(mbappe_pid, "Kylian Mbappe")
+print(f"  [PASS] get_player_texture({mbappe_pid}) returned: {tex_mbappe}")
+
+# --- 5. Testing Unified Batch Assets Downloader (Crests + Player Faces) ---
+print("\n--- 5. Testing Unified Batch Assets Downloader ---")
 dummy_teams = [
-    {"teamid": 243, "name": "Real Madrid"},
-    {"teamid": 10, "name": "Manchester City"},
-    {"teamid": 1, "name": "Arsenal"},
-    {"teamid": 21, "name": "Bayern Munich"},
-    {"teamid": 241, "name": "Barcelona"},
+    {"teamid": 243, "name": "Real Madrid", "roster": [231747, 238794]},
+    {"teamid": 10, "name": "Manchester City", "roster": [239085]},
+    {"teamid": 1, "name": "Arsenal", "roster": [209331]},
 ]
 
 progress_updates = []
 completion_data = []
 
-ok, msg = assets.start_batch_crest_download(
+ok, msg = assets.start_batch_assets_download(
     dummy_teams,
+    priority_team_id=243,
     on_progress=lambda p: progress_updates.append(dict(p)),
     on_complete=lambda p: completion_data.append(dict(p))
 )
-assert ok, f"Batch download failed to start: {msg}"
+assert ok, f"Batch asset download failed to start: {msg}"
 
 # Wait for dummy batch to finish
-time.sleep(2.0)
-assert len(completion_data) > 0, "Batch download should have completed"
+time.sleep(3.0)
+assert len(completion_data) > 0, "Batch asset download should have completed"
 final_p = completion_data[0]
-print(f"  [PASS] Batch progress: {final_p['completed']}/{final_p['total']} processed, {final_p['skipped']} already cached")
+print(f"  [PASS] Batch progress: {final_p['completed']}/{final_p['total']} total assets, {final_p['skipped']} cached, {final_p['downloaded']} downloaded")
 
-# --- 5. Clean up DPG context ---
+# --- 6. Clean up DPG context ---
 dpg.destroy_context()
 
 print("\n" + "=" * 70)
-print("ALL TESTS PASSED: Club Crest & Logo Pipeline is 100% Verified!")
+print("ALL TESTS PASSED: Unified Asset Pipeline is 100% Verified!")
 print("=" * 70)

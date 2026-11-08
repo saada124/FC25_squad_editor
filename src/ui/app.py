@@ -131,6 +131,7 @@ class SquadEditorApp:
                 if hasattr(self, "selected_team_roster_pid") and self.selected_team_roster_pid == id_val:
                     if dpg.does_item_exist("roster_player_miniface_img"):
                         dpg.configure_item("roster_player_miniface_img", texture_tag=tag)
+                self.assets.cleanup_old_player_texture(id_val)
             elif asset_type == "club":
                 if self.selected_team:
                     cur_tid = self.selected_team.get("teamid", 0)
@@ -750,14 +751,14 @@ class SquadEditorApp:
                 with dpg.group(horizontal=True):
                     dpg.add_text("Total Clubs: 0", tag="team_count_label", color=(150, 150, 150))
                     dpg.add_spacer(width=6)
-                    dpg.add_button(label="[Download All Logos]", callback=self._on_start_batch_crests_download, tag="btn_batch_crests")
+                    dpg.add_button(label="[Download All Assets]", callback=self._on_start_batch_assets_download, tag="btn_batch_assets")
 
-                with dpg.group(tag="batch_crests_progress_group", show=False):
-                    dpg.add_progress_bar(tag="batch_crests_progress_bar", default_value=0.0, width=390)
+                with dpg.group(tag="batch_assets_progress_group", show=False):
+                    dpg.add_progress_bar(tag="batch_assets_progress_bar", default_value=0.0, width=390)
                     with dpg.group(horizontal=True):
-                        dpg.add_text("Downloading: 0/0", tag="batch_crests_status_txt", color=(0, 200, 255))
+                        dpg.add_text("Downloading: 0/0", tag="batch_assets_status_txt", color=(0, 200, 255))
                         dpg.add_spacer(width=10)
-                        dpg.add_button(label="[Cancel]", callback=self._on_cancel_batch_crests_download, tag="btn_cancel_batch_crests")
+                        dpg.add_button(label="[Cancel]", callback=self._on_cancel_batch_assets_download, tag="btn_cancel_batch_assets")
                     dpg.add_separator()
 
                 dpg.add_listbox(items=[], num_items=26, tag="teams_listbox", callback=self._on_select_team, width=390)
@@ -2858,56 +2859,59 @@ class SquadEditorApp:
         else:
             dpg.set_value("team_save_feedback", f"[Error] {msg}")
 
-    def _on_start_batch_crests_download(self):
-        """Starts background batch download of all missing club logos."""
+    def _on_start_batch_assets_download(self):
+        """Starts background batch download of all missing club logos and roster player faces."""
         if not self.session.teams_cache:
             dpg.set_value("team_save_feedback", "[!] Please load a squads file first.")
             return
         if getattr(self.assets, "batch_download_running", False):
             return
 
-        dpg.configure_item("batch_crests_progress_group", show=True)
-        dpg.configure_item("btn_batch_crests", show=False)
-        dpg.set_value("batch_crests_progress_bar", 0.0)
-        dpg.set_value("batch_crests_status_txt", "Starting download...")
+        priority_tid = self.selected_team.get("teamid", 0) if self.selected_team else 0
+        dpg.configure_item("batch_assets_progress_group", show=True)
+        dpg.configure_item("btn_batch_assets", show=False)
+        dpg.set_value("batch_assets_progress_bar", 0.0)
+        dpg.set_value("batch_assets_status_txt", "Scanning assets...")
 
         def on_prog(prog):
             total = max(1, prog.get("total", 1))
             done = prog.get("completed", 0)
-            cur = prog.get("current_team", "")
+            cur = prog.get("current_item", "")
             dl = prog.get("downloaded", 0)
             pct = done / total
-            if dpg.does_item_exist("batch_crests_progress_bar"):
-                dpg.set_value("batch_crests_progress_bar", pct)
-            if dpg.does_item_exist("batch_crests_status_txt"):
-                dpg.set_value("batch_crests_status_txt", f"[{done}/{total}] {dl} new ({int(pct*100)}%) - {cur[:16]}")
+            if dpg.does_item_exist("batch_assets_progress_bar"):
+                dpg.set_value("batch_assets_progress_bar", pct)
+            if dpg.does_item_exist("batch_assets_status_txt"):
+                dpg.set_value("batch_assets_status_txt", f"[{done}/{total}] {dl} new ({int(pct*100)}%) - {cur[:20]}")
 
         def on_comp(prog):
-            if dpg.does_item_exist("batch_crests_progress_bar"):
-                dpg.set_value("batch_crests_progress_bar", 1.0)
-            if dpg.does_item_exist("batch_crests_status_txt"):
+            if dpg.does_item_exist("batch_assets_progress_bar"):
+                dpg.set_value("batch_assets_progress_bar", 1.0)
+            if dpg.does_item_exist("batch_assets_status_txt"):
                 dl = prog.get("downloaded", 0)
-                dpg.set_value("batch_crests_status_txt", f"Completed: {dl} logos downloaded!")
-            if dpg.does_item_exist("btn_batch_crests"):
-                dpg.configure_item("btn_batch_crests", show=True)
+                dpg.set_value("batch_assets_status_txt", f"Completed: {dl} new assets downloaded & cached!")
+            if dpg.does_item_exist("btn_batch_assets"):
+                dpg.configure_item("btn_batch_assets", show=True)
             if self.selected_team and dpg.does_item_exist("team_crest_img"):
                 tid = self.selected_team["teamid"]
                 tex = self.assets.get_club_texture(tid, self.selected_team["name"])
                 dpg.configure_item("team_crest_img", texture_tag=tex)
 
-        self.assets.start_batch_crest_download(
+        self.assets.start_batch_assets_download(
             self.session.teams_cache,
+            players_lookup=self.session.players_lookup,
+            priority_team_id=priority_tid,
             on_progress=on_prog,
             on_complete=on_comp
         )
 
-    def _on_cancel_batch_crests_download(self):
-        """Cancels active batch crest download."""
-        self.assets.cancel_batch_crest_download()
-        if dpg.does_item_exist("batch_crests_status_txt"):
-            dpg.set_value("batch_crests_status_txt", "Cancelled by user.")
-        if dpg.does_item_exist("btn_batch_crests"):
-            dpg.configure_item("btn_batch_crests", show=True)
+    def _on_cancel_batch_assets_download(self):
+        """Cancels active batch assets download."""
+        self.assets.cancel_batch_assets_download()
+        if dpg.does_item_exist("batch_assets_status_txt"):
+            dpg.set_value("batch_assets_status_txt", "Cancelled by user.")
+        if dpg.does_item_exist("btn_batch_assets"):
+            dpg.configure_item("btn_batch_assets", show=True)
 
     def _on_import_manager_face(self):
         """Allows user to select and import a custom manager photo."""

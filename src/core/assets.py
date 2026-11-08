@@ -84,6 +84,7 @@ class AssetManager:
 
         # Version tracking for DPG textures to prevent alias reuse collisions
         self.club_texture_versions: Dict[int, int] = {}
+        self.player_texture_versions: Dict[int, int] = {}
 
         # Batch downloader state
         self.batch_download_running: bool = False
@@ -103,11 +104,12 @@ class AssetManager:
                         if new_tag and callable(self.on_asset_loaded):
                             self.on_asset_loaded("club", team_id, new_tag)
                 elif asset_type == "player":
-                    player_id, local_path, tag = item[1], item[2], item[3]
+                    player_id = item[1]
+                    local_path = item[2]
                     if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                        if self._load_image_to_texture(local_path, tag):
-                            if callable(self.on_asset_loaded):
-                                self.on_asset_loaded("player", player_id, tag)
+                        new_tag = self._load_player_texture_from_file(player_id, local_path)
+                        if new_tag and callable(self.on_asset_loaded):
+                            self.on_asset_loaded("player", player_id, new_tag)
             except Exception:
                 pass
 
@@ -268,23 +270,67 @@ class AssetManager:
                     pass
             self.loaded_textures.discard(old_tag)
 
+    def _load_player_texture_from_file(self, player_id: int, img_path: str) -> str:
+        """Loads a player miniface image into DPG using versioned texture tags to prevent alias conflicts."""
+        if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
+            return "tex_default_player"
+        try:
+            try:
+                w, h, channels, data = dpg.load_image(img_path)
+            except Exception:
+                with Image.open(img_path) as im:
+                    im = im.convert("RGBA")
+                    im.save(img_path, "PNG")
+                w, h, channels, data = dpg.load_image(img_path)
+
+            old_ver = self.player_texture_versions.get(player_id, 0)
+            new_ver = old_ver + 1
+            new_tag = f"tex_player_{player_id}_v{new_ver}"
+
+            dpg.add_static_texture(width=w, height=h, default_value=data, tag=new_tag, parent="app_texture_registry")
+            self.player_texture_versions[player_id] = new_ver
+            self.loaded_textures.add(new_tag)
+
+            return new_tag
+        except Exception:
+            return "tex_default_player"
+
+    def cleanup_old_player_texture(self, player_id: int):
+        """Cleans up superseded texture versions for a player after UI has re-bound."""
+        cur_ver = self.player_texture_versions.get(player_id, 0)
+        for v in range(1, cur_ver):
+            old_tag = f"tex_player_{player_id}_v{v}"
+            if dpg.does_item_exist(old_tag):
+                try:
+                    dpg.delete_item(old_tag)
+                except Exception:
+                    pass
+            self.loaded_textures.discard(old_tag)
+
     def get_player_texture(self, player_id: int, player_name: str = "", jersey: int = 10, ovr: int = 75, pos: str = "CM") -> str:
         """Returns the DPG texture tag for a player. Loads from disk or queues background download."""
-        tag = f"tex_player_{player_id}"
-        if tag in self.loaded_textures and dpg.does_item_exist(tag):
-            return tag
+        if player_id <= 0:
+            return "tex_default_player"
 
         local_path = os.path.join(self.faces_dir, f"p{player_id}.png")
         if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-            if self._load_image_to_texture(local_path, tag):
-                return tag
+            if player_id in self.player_texture_versions:
+                tag = f"tex_player_{player_id}_v{self.player_texture_versions[player_id]}"
+                if dpg.does_item_exist(tag):
+                    return tag
+            return self._load_player_texture_from_file(player_id, local_path)
 
         le_path = os.path.join(self.le_heads_dir, f"p{player_id}.png")
         if os.path.exists(le_path) and os.path.getsize(le_path) > 0:
-            if self._load_image_to_texture(le_path, tag):
+            return self._load_player_texture_from_file(player_id, le_path)
+
+        if player_id in self.player_texture_versions:
+            tag = f"tex_player_{player_id}_v{self.player_texture_versions[player_id]}"
+            if dpg.does_item_exist(tag):
+                self._queue_player_download(player_id, local_path)
                 return tag
 
-        self._queue_player_download(player_id, tag, local_path)
+        self._queue_player_download(player_id, local_path)
         return "tex_default_player"
 
     def get_club_texture(self, team_id: int, team_name: str = "") -> str:
@@ -364,29 +410,45 @@ class AssetManager:
 
         return "tex_default_manager"
 
-    def _queue_player_download(self, player_id: int, tag: str, local_path: str):
+    def _queue_player_download(self, player_id: int, local_path: str):
         with self.lock:
             if player_id in self.download_queue:
                 return
             self.download_queue.add(player_id)
 
         def _worker():
-            url = f"https://cdn.futbin.com/content/fifa25/img/players/{player_id}.png"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=4) as resp:
-                    if resp.status == 200:
-                        content = resp.read()
-                        with open(local_path, "wb") as f:
-                            f.write(content)
-                        # Queue for safe main-thread texture registration
-                        self.pending_textures_queue.put(("player", player_id, local_path, tag))
-            except Exception:
-                pass
-            finally:
-                with self.lock:
-                    self.download_queue.discard(player_id)
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            urls = [
+                f"https://cdn.futwiz.com/assets/img/fc25/faces/{player_id}.png",
+                f"https://cdn.futbin.com/content/fifa25/img/players/{player_id}.png",
+                f"https://cdn.futwiz.com/assets/img/fc24/faces/{player_id}.png",
+                f"https://cdn.futbin.com/content/fifa24/img/players/{player_id}.png",
+            ]
+            content = None
+            for url in urls:
+                try:
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        if resp.status == 200:
+                            data = resp.read()
+                            if len(data) > 500:
+                                content = data
+                                break
+                except Exception:
+                    continue
+
+            if content:
+                try:
+                    im = Image.open(io.BytesIO(content)).convert("RGBA")
+                    im.save(local_path, "PNG")
+                    self.pending_textures_queue.put(("player", player_id, local_path))
+                except Exception:
+                    with open(local_path, "wb") as f:
+                        f.write(content)
+                    self.pending_textures_queue.put(("player", player_id, local_path))
+
+            with self.lock:
+                self.download_queue.discard(player_id)
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
@@ -455,28 +517,66 @@ class AssetManager:
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
 
-    def start_batch_crest_download(
+    def start_batch_assets_download(
         self,
         teams_list: List[Dict[str, Any]],
+        players_lookup: Optional[Dict[int, Any]] = None,
+        priority_team_id: int = 0,
         on_progress=None,
         on_complete=None
     ) -> Tuple[bool, str]:
         """
-        Starts a background batch download of authentic crests for all teams that
-        are missing local crests.
+        Starts a background batch download of authentic crests AND player minifaces
+        for all teams and active roster players that are missing local files.
         """
         if self.batch_download_running:
             return False, "Batch download is already running."
 
+        queue_items = []
+        seen_pids = set()
+
+        priority_team = None
+        other_teams = []
+        for t in teams_list:
+            if t.get("teamid") == priority_team_id:
+                priority_team = t
+            else:
+                other_teams.append(t)
+
+        ordered_teams = ([priority_team] if priority_team else []) + other_teams
+
+        # 1. Add club crests
+        for t in ordered_teams:
+            tid = t.get("teamid", 0)
+            tname = t.get("name", "")
+            if tid > 0:
+                local_path = os.path.join(self.crests_dir, f"c{tid}.png")
+                queue_items.append(("club", tid, tname, local_path))
+
+        # 2. Add roster player faces
+        for t in ordered_teams:
+            for pid in t.get("roster", []):
+                if pid > 0 and pid not in seen_pids:
+                    seen_pids.add(pid)
+                    pname = ""
+                    if players_lookup and pid in players_lookup:
+                        pname = players_lookup[pid].get("name", "")
+                    local_path = os.path.join(self.faces_dir, f"p{pid}.png")
+                    queue_items.append(("player", pid, pname or f"Player #{pid}", local_path))
+
         self.batch_download_running = True
         self.batch_download_cancel = False
         self.batch_progress = {
-            "total": len(teams_list),
+            "total": len(queue_items),
             "completed": 0,
             "downloaded": 0,
             "skipped": 0,
             "failed": 0,
-            "current_team": ""
+            "current_item": "",
+            "crests_total": len(ordered_teams),
+            "faces_total": len(seen_pids),
+            "crests_done": 0,
+            "faces_done": 0,
         }
 
         def _batch_worker():
@@ -485,44 +585,78 @@ class AssetManager:
                 "Referer": "https://sofifa.com/"
             }
 
-            for t in teams_list:
+            for item in queue_items:
                 if self.batch_download_cancel:
                     break
 
-                tid = t.get("teamid", 0)
-                tname = t.get("name", "")
-                if tid <= 0:
-                    self.batch_progress["completed"] += 1
-                    continue
-
-                self.batch_progress["current_team"] = tname
-                local_path = os.path.join(self.crests_dir, f"c{tid}.png")
+                itype, iid, iname, local_path = item
+                self.batch_progress["current_item"] = f"[{itype.upper()}] {iname}"
 
                 # Skip if already downloaded and valid
                 if os.path.exists(local_path) and os.path.getsize(local_path) > 500:
                     self.batch_progress["skipped"] += 1
                     self.batch_progress["completed"] += 1
+                    if itype == "club":
+                        self.batch_progress["crests_done"] += 1
+                    else:
+                        self.batch_progress["faces_done"] += 1
                     if callable(on_progress):
                         on_progress(dict(self.batch_progress))
                     continue
 
-                parent_id = get_parent_club_id(tid)
-                target_ids = []
-                if tid == 113154:
-                    target_ids.append(113217)
-                target_ids.append(tid)
-                if parent_id > 0 and parent_id != tid:
-                    target_ids.append(parent_id)
-
                 content = None
-                for dl_id in target_ids:
+
+                if itype == "club":
+                    parent_id = get_parent_club_id(iid)
+                    target_ids = []
+                    if iid == 113154:
+                        target_ids.append(113217)
+                    target_ids.append(iid)
+                    if parent_id > 0 and parent_id != iid:
+                        target_ids.append(parent_id)
+
+                    for dl_id in target_ids:
+                        urls = [
+                            f"https://cdn.futwiz.com/assets/img/fc25/badges/{dl_id}.png",
+                            f"https://cdn.sofifa.net/teams/{dl_id}/120.png",
+                            f"https://cdn.futbin.com/content/fifa25/img/clubs/{dl_id}.png",
+                            f"https://cdn.sofifa.net/teams/{dl_id}/60.png",
+                            f"https://cdn.futwiz.com/assets/img/fc24/badges/{dl_id}.png",
+                            f"https://cdn.futwiz.com/assets/img/fifa23/badges/{dl_id}.png",
+                        ]
+                        for url in urls:
+                            try:
+                                req = urllib.request.Request(url, headers=headers)
+                                with urllib.request.urlopen(req, timeout=3) as resp:
+                                    if resp.status == 200:
+                                        data = resp.read()
+                                        if len(data) > 500:
+                                            content = data
+                                            break
+                            except Exception:
+                                continue
+                        if content:
+                            break
+
+                    if content:
+                        try:
+                            im = Image.open(io.BytesIO(content)).convert("RGBA")
+                            im.save(local_path, "PNG")
+                            self.batch_progress["downloaded"] += 1
+                            self.pending_textures_queue.put(("club", iid, local_path))
+                        except Exception:
+                            self.batch_progress["failed"] += 1
+                    else:
+                        self.batch_progress["failed"] += 1
+
+                    self.batch_progress["crests_done"] += 1
+
+                elif itype == "player":
                     urls = [
-                        f"https://cdn.futwiz.com/assets/img/fc25/badges/{dl_id}.png",
-                        f"https://cdn.sofifa.net/teams/{dl_id}/120.png",
-                        f"https://cdn.futbin.com/content/fifa25/img/clubs/{dl_id}.png",
-                        f"https://cdn.sofifa.net/teams/{dl_id}/60.png",
-                        f"https://cdn.futwiz.com/assets/img/fc24/badges/{dl_id}.png",
-                        f"https://cdn.futwiz.com/assets/img/fifa23/badges/{dl_id}.png",
+                        f"https://cdn.futwiz.com/assets/img/fc25/faces/{iid}.png",
+                        f"https://cdn.futbin.com/content/fifa25/img/players/{iid}.png",
+                        f"https://cdn.futwiz.com/assets/img/fc24/faces/{iid}.png",
+                        f"https://cdn.futbin.com/content/fifa24/img/players/{iid}.png",
                     ]
                     for url in urls:
                         try:
@@ -535,25 +669,27 @@ class AssetManager:
                                         break
                         except Exception:
                             continue
-                    if content:
-                        break
+                        if content:
+                            break
 
-                if content:
-                    try:
-                        im = Image.open(io.BytesIO(content)).convert("RGBA")
-                        im.save(local_path, "PNG")
-                        self.batch_progress["downloaded"] += 1
-                        self.pending_textures_queue.put(("club", tid, local_path))
-                    except Exception:
+                    if content:
+                        try:
+                            im = Image.open(io.BytesIO(content)).convert("RGBA")
+                            im.save(local_path, "PNG")
+                            self.batch_progress["downloaded"] += 1
+                            self.pending_textures_queue.put(("player", iid, local_path))
+                        except Exception:
+                            self.batch_progress["failed"] += 1
+                    else:
                         self.batch_progress["failed"] += 1
-                else:
-                    self.batch_progress["failed"] += 1
+
+                    self.batch_progress["faces_done"] += 1
 
                 self.batch_progress["completed"] += 1
                 if callable(on_progress):
                     on_progress(dict(self.batch_progress))
 
-                time.sleep(0.04)
+                time.sleep(0.02)
 
             self.batch_download_running = False
             if callable(on_complete):
@@ -561,14 +697,22 @@ class AssetManager:
 
         t = threading.Thread(target=_batch_worker, daemon=True)
         t.start()
-        return True, "Batch crest download started."
+        return True, "Batch asset download started."
 
-    def cancel_batch_crest_download(self) -> bool:
-        """Signals active batch crest download worker to cancel."""
+    def start_batch_crest_download(self, teams_list, on_progress=None, on_complete=None):
+        """Backward-compatible alias for batch downloading crests and assets."""
+        return self.start_batch_assets_download(teams_list, on_progress=on_progress, on_complete=on_complete)
+
+    def cancel_batch_assets_download(self) -> bool:
+        """Signals active batch download worker to cancel."""
         if getattr(self, "batch_download_running", False):
             self.batch_download_cancel = True
             return True
         return False
+
+    def cancel_batch_crest_download(self) -> bool:
+        """Backward-compatible alias for cancel_batch_assets_download."""
+        return self.cancel_batch_assets_download()
 
     def import_custom_player_face(self, player_id: int, source_filepath: str) -> Tuple[bool, str]:
         """Imports an external image file (PNG/JPG/BMP/DDS) as player's authentic miniface."""
@@ -579,9 +723,7 @@ class AssetManager:
             target_path = os.path.join(self.faces_dir, f"p{player_id}.png")
             img.save(target_path, "PNG")
 
-            # Reload texture
-            tag = f"tex_player_{player_id}"
-            self._load_image_to_texture(target_path, tag)
+            self._load_player_texture_from_file(player_id, target_path)
             return True, f"Miniface successfully imported for player #{player_id}!"
         except Exception as e:
             return False, f"Failed to import miniface: {str(e)}"
