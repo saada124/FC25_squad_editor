@@ -65,6 +65,7 @@ class SquadEditorApp:
         self.filter_preset: str = "All Players"
         self.preset_filter_names = [
             "All Players",
+            "Transferred Players [T]",
             "Free Agents",
             "Top Superstars (85+)",
             "Wonderkids (POT 85+, Age <= 21)",
@@ -75,8 +76,35 @@ class SquadEditorApp:
             "Retiring Players",
             "Generated Players"
         ]
+        self.pos_filter_options = [
+            "All", "Attackers", "Midfielders", "Defenders", "Goalkeepers",
+            "GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM", "RM", "LW", "RW", "CF", "ST"
+        ]
+        self.sort_by_options = [
+            "Overall (High -> Low)",
+            "Overall (Low -> High)",
+            "Potential (High -> Low)",
+            "Name (A -> Z)",
+            "Age (Young -> Old)",
+            "Age (Old -> Young)",
+            "Player ID"
+        ]
+        self.age_bracket_options = [
+            "Any Age",
+            "U21 (<=21)",
+            "U23 (<=23)",
+            "Prime (24-29)",
+            "30+ Vet"
+        ]
         self.filter_pos_category: str = "All"
         self.min_ovr_filter: int = 0
+        self.max_ovr_filter: int = 99
+        self.filter_league: str = "All Leagues"
+        self.filter_club: str = "All Clubs"
+        self.filter_nation: str = "All Nations"
+        self.filter_foot: str = "Any"
+        self.filter_age_bracket: str = "Any Age"
+        self.sort_by_mode: str = "Overall (High -> Low)"
         self.assets.on_asset_loaded = self._on_async_asset_loaded
 
     def _on_async_asset_loaded(self, asset_type: str, id_val: int, tag: str):
@@ -118,8 +146,7 @@ class SquadEditorApp:
         if os.path.exists(font_path):
             try:
                 with dpg.font_registry():
-                    with dpg.font(font_path, 16) as def_font:
-                        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    def_font = dpg.add_font(font_path, 16)
                 dpg.bind_font(def_font)
             except Exception:
                 pass
@@ -296,30 +323,57 @@ class SquadEditorApp:
 
     def _build_players_tab(self):
         with dpg.group(horizontal=True):
-            # Left Column: Player Search & Filtering Pane
-            with dpg.child_window(width=420):
-                dpg.add_text("Search & Filter Players", color=(0, 180, 240))
-                
-                # Preset Filter Combo
+            # Left Column: Player Search & Multi-Criteria Filtering Pane
+            with dpg.child_window(width=440):
                 with dpg.group(horizontal=True):
-                    dpg.add_text("Filter:")
-                    dpg.add_combo(items=self.preset_filter_names, default_value="All Players", callback=self._on_change_preset_filter, tag="player_preset_combo", width=340)
+                    dpg.add_text("Search & Filter Players", color=(0, 180, 240))
+                    dpg.add_spacer(width=45)
+                    dpg.add_button(label="Reset", callback=self._on_clear_player_search, width=65)
+                    dpg.add_button(label="Export CSV", callback=self._on_export_filtered_players_csv, width=90)
                 
                 # Search Bar with Instant Filter & Clear
                 with dpg.group(horizontal=True):
-                    dpg.add_input_text(hint="Search player name or ID...", callback=self._on_filter_players, tag="player_search_input", width=350)
-                    dpg.add_button(label="X", callback=self._on_clear_player_search, width=30)
-                    
-                # Position Category & Min Rating Sliders
+                    dpg.add_input_text(hint="Search name, ID, club, nation, league...", callback=self._on_filter_players, tag="player_search_input", width=385)
+                    dpg.add_button(label="X", callback=self._on_clear_search_box_only, width=30)
+
+                # Row 2: Preset & Sort By
                 with dpg.group(horizontal=True):
-                    dpg.add_text("Pos:")
-                    dpg.add_combo(items=["All", "Attackers", "Midfielders", "Defenders", "Goalkeepers"], default_value="All", callback=self._on_change_pos_filter, tag="player_pos_combo", width=140)
+                    dpg.add_text("Preset:")
+                    dpg.add_combo(items=self.preset_filter_names, default_value="All Players", callback=self._on_change_preset_filter, tag="player_preset_combo", width=155)
+                    dpg.add_text("Sort:")
+                    dpg.add_combo(items=self.sort_by_options, default_value="Overall (High -> Low)", callback=self._on_change_sort_by, tag="player_sort_combo", width=165)
+
+                # Row 3: Position (Group or Exact), Preferred Foot & Age Bracket
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Pos:   ")
+                    dpg.add_combo(items=self.pos_filter_options, default_value="All", callback=self._on_change_pos_filter, tag="player_pos_combo", width=105)
+                    dpg.add_text("Foot:")
+                    dpg.add_combo(items=["Any", "Right", "Left"], default_value="Any", callback=self._on_change_foot_filter, tag="player_foot_combo", width=75)
+                    dpg.add_text("Age:")
+                    dpg.add_combo(items=self.age_bracket_options, default_value="Any Age", callback=self._on_change_age_filter, tag="player_age_combo", width=115)
+
+                # Row 4: League & Nation Dropdowns
+                with dpg.group(horizontal=True):
+                    dpg.add_text("League:")
+                    dpg.add_combo(items=["All Leagues"] + self.session.all_leagues, default_value="All Leagues", callback=self._on_change_league_filter, tag="player_league_filter_combo", width=155)
+                    dpg.add_text("Nation:")
+                    dpg.add_combo(items=["All Nations"] + self.session.all_nations, default_value="All Nations", callback=self._on_change_nation_filter, tag="player_nation_filter_combo", width=148)
+
+                # Row 5: Club Dropdown (Cascades from League filter)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Club:  ")
+                    dpg.add_combo(items=["All Clubs", "Free Agent"], default_value="All Clubs", callback=self._on_change_club_filter, tag="player_club_filter_combo", width=365)
+
+                # Row 6: Min & Max Overall Rating Range
+                with dpg.group(horizontal=True):
                     dpg.add_text("Min OVR:")
-                    dpg.add_slider_int(min_value=0, max_value=95, default_value=0, callback=self._on_change_min_ovr, tag="player_min_ovr_slider", width=120)
+                    dpg.add_slider_int(min_value=0, max_value=99, default_value=0, callback=self._on_change_min_ovr, tag="player_min_ovr_slider", width=130)
+                    dpg.add_text("Max OVR:")
+                    dpg.add_slider_int(min_value=1, max_value=99, default_value=99, callback=self._on_change_max_ovr, tag="player_max_ovr_slider", width=130)
 
                 dpg.add_separator()
                 dpg.add_text("Total Players: 0", tag="player_count_label", color=(150, 150, 150))
-                dpg.add_listbox(items=[], num_items=25, tag="players_listbox", callback=self._on_select_player, width=400)
+                dpg.add_listbox(items=[], num_items=20, tag="players_listbox", callback=self._on_select_player, width=420)
 
             # Right Column: Player Attribute Inspector & Full Editor
             with dpg.child_window():
@@ -1379,6 +1433,31 @@ class SquadEditorApp:
                 club_items.append(f"{t['name']} (ID {t['teamid']})")
         if dpg.does_item_exist("edit_player_club_combo"):
             dpg.configure_item("edit_player_club_combo", items=club_items)
+        if dpg.does_item_exist("player_league_filter_combo"):
+            dpg.configure_item("player_league_filter_combo", items=["All Leagues"] + self.session.all_leagues)
+        if dpg.does_item_exist("player_nation_filter_combo"):
+            dpg.configure_item("player_nation_filter_combo", items=["All Nations"] + self.session.all_nations)
+        self._refresh_club_filter_combo()
+
+    def _refresh_club_filter_combo(self):
+        if not dpg.does_item_exist("player_club_filter_combo"):
+            return
+        filter_clubs = ["All Clubs", "Free Agent"]
+        seen = {"All Clubs", "Free Agent"}
+        target_lg = self.filter_league
+        for t in self.session.teams_cache:
+            if t["teamid"] <= 0:
+                continue
+            if target_lg != "All Leagues" and t.get("league", "") != target_lg:
+                continue
+            cname = t["name"]
+            if cname not in seen:
+                filter_clubs.append(cname)
+                seen.add(cname)
+        dpg.configure_item("player_club_filter_combo", items=filter_clubs)
+        if self.filter_club not in seen:
+            self.filter_club = "All Clubs"
+            dpg.set_value("player_club_filter_combo", "All Clubs")
 
     # --- Players UI Callbacks ---
 
@@ -1389,43 +1468,103 @@ class SquadEditorApp:
         self.filter_preset = app_data
         self._on_filter_players()
 
+    def _on_change_sort_by(self, sender, app_data):
+        self.sort_by_mode = app_data
+        self._on_filter_players()
+
+    def _on_change_foot_filter(self, sender, app_data):
+        self.filter_foot = app_data
+        self._on_filter_players()
+
+    def _on_change_age_filter(self, sender, app_data):
+        self.filter_age_bracket = app_data
+        self._on_filter_players()
+
+    def _on_change_league_filter(self, sender, app_data):
+        self.filter_league = app_data
+        self._refresh_club_filter_combo()
+        self._on_filter_players()
+
+    def _on_change_nation_filter(self, sender, app_data):
+        self.filter_nation = app_data
+        self._on_filter_players()
+
+    def _on_change_club_filter(self, sender, app_data):
+        self.filter_club = app_data
+        self._on_filter_players()
+
+    def _on_change_max_ovr(self, sender, app_data):
+        self.max_ovr_filter = app_data
+        self._on_filter_players()
+
+    def _on_clear_search_box_only(self):
+        if dpg.does_item_exist("player_search_input"):
+            dpg.set_value("player_search_input", "")
+        self._on_filter_players()
+
+    def _on_export_filtered_players_csv(self):
+        if not self.filtered_players:
+            dpg.set_value("status_text", "No filtered players to export.")
+            return
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        default_name = f"FC25_Players_Filtered_{len(self.filtered_players)}.csv"
+        target_path = filedialog.asksaveasfilename(
+            title="Export Filtered Players to CSV",
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV Spreadsheet", "*.csv"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not target_path:
+            return
+        ok, msg, _ = self.session.export_players_list_csv(self.filtered_players, target_path)
+        dpg.set_value("status_text", f"[OK] {msg}" if ok else f"[ERR] {msg}")
+
     def _on_filter_players(self):
         search_txt = ""
         if dpg.does_item_exist("player_search_input"):
             search_txt = (dpg.get_value("player_search_input") or "").lower().strip()
         pos_cat = self.filter_pos_category
         min_ovr = self.min_ovr_filter
+        max_ovr = self.max_ovr_filter
         preset = self.filter_preset
+        target_league = self.filter_league
+        target_nation = self.filter_nation
+        target_club = self.filter_club
+        target_foot = self.filter_foot
+        target_age = self.filter_age_bracket
 
         filtered = []
         for p in self.session.players_cache:
-            if min_ovr > 0 and p["overall"] < min_ovr:
+            ovr = p["overall"]
+            if (min_ovr > 0 and ovr < min_ovr) or (max_ovr < 99 and ovr > max_ovr):
                 continue
 
             # Presets copied from Live Editor filters/players
-            if "Free Agents" in preset:
+            if "Transferred Players" in preset:
+                if p["playerid"] not in self.session.user_transfers:
+                    continue
+            elif "Free Agents" in preset:
                 if p["teamid"] not in (0, 111592):
                     continue
             elif "Superstars" in preset:
-                if p["overall"] < 85:
+                if ovr < 85:
                     continue
             elif "Wonderkids" in preset:
                 if p["potential"] < 85 or p.get("age", 25) > 21:
                     continue
             elif "Messi Regen" in preset:
-                # RW, Nat 52 (Argentina), Potential >= 89, or generated
                 if not (p["pos_code"] == 23 and p.get("nationality") == 52 and p["potential"] >= 89):
                     continue
             elif "CR7 Regen" in preset:
-                # ST, Nat 38 (Portugal), Potential >= 85, or generated
                 if not (p["pos_code"] == 25 and p.get("nationality") == 38 and p["potential"] >= 85):
                     continue
             elif "Benzema Regen" in preset:
-                # ST, Nat 18 (France), Potential >= 85
                 if not (p["pos_code"] == 25 and p.get("nationality") == 18 and p["potential"] >= 85):
                     continue
             elif "RL9 Regen" in preset:
-                # ST, Nat 37 (Poland), Potential >= 85
                 if not (p["pos_code"] == 25 and p.get("nationality") == 37 and p["potential"] >= 85):
                     continue
             elif "Retiring" in preset:
@@ -1435,26 +1574,82 @@ class SquadEditorApp:
                 if p["playerid"] < 460000:
                     continue
 
-            # Position filtering
-            pos = p["position"]
-            if pos_cat == "Attackers" and pos not in ("ST", "RW", "LW", "CF", "RF", "LF", "RS", "LS"):
-                continue
-            elif pos_cat == "Midfielders" and pos not in ("CAM", "CM", "CDM", "LM", "RM", "RCM", "LCM", "RDM", "LDM", "RAM", "LAM"):
-                continue
-            elif pos_cat == "Defenders" and pos not in ("CB", "LB", "RB", "LWB", "RWB", "RCB", "LCB", "SW"):
-                continue
-            elif pos_cat == "Goalkeepers" and pos != "GK":
+            # Position filtering (Group or Exact + Alternate Positions)
+            if pos_cat != "All":
+                pos = p["position"]
+                if pos_cat == "Attackers":
+                    if pos not in ("ST", "RW", "LW", "CF", "RF", "LF", "RS", "LS"):
+                        continue
+                elif pos_cat == "Midfielders":
+                    if pos not in ("CAM", "CM", "CDM", "LM", "RM", "RCM", "LCM", "RDM", "LDM", "RAM", "LAM"):
+                        continue
+                elif pos_cat == "Defenders":
+                    if pos not in ("CB", "LB", "RB", "LWB", "RWB", "RCB", "LCB", "SW"):
+                        continue
+                elif pos_cat == "Goalkeepers":
+                    if pos != "GK":
+                        continue
+                else:
+                    alt_pos_list = [ap.strip() for ap in str(p.get("alt_positions", "")).replace("/", ",").split(",") if ap.strip()]
+                    if pos != pos_cat and pos_cat not in alt_pos_list:
+                        continue
+
+            # Preferred Foot filtering
+            if target_foot != "Any" and p.get("foot", "Right") != target_foot:
                 continue
 
-            # Search text matching: name or ID
+            # Age Bracket filtering
+            if target_age != "Any Age":
+                age_val = p.get("age", 25)
+                if target_age == "U21 (<=21)" and age_val > 21:
+                    continue
+                elif target_age == "U23 (<=23)" and age_val > 23:
+                    continue
+                elif target_age == "Prime (24-29)" and not (24 <= age_val <= 29):
+                    continue
+                elif target_age == "30+ Vet" and age_val < 30:
+                    continue
+
+            # League filtering
+            if target_league != "All Leagues" and p.get("league", "") != target_league:
+                continue
+
+            # Nation filtering
+            if target_nation != "All Nations" and p.get("nation_name", "") != target_nation:
+                continue
+
+            # Club filtering
+            if target_club != "All Clubs":
+                if target_club == "Free Agent":
+                    if p["teamid"] not in (0, 111592) and p["club"] != "Free Agent":
+                        continue
+                elif p["club"] != target_club:
+                    continue
+
+            # Search text matching: name, ID, club, nation, league, or position
             if search_txt:
-                name_match = search_txt in p["name"].lower()
-                id_match = search_txt in str(p["playerid"])
-                club_match = search_txt in p["club"].lower()
-                if not (name_match or id_match or club_match):
+                haystack = f"{p['name']} {p['playerid']} {p['club']} {p.get('nation_name', '')} {p.get('league', '')} {p['position']}".lower()
+                if search_txt not in haystack:
                     continue
 
             filtered.append(p)
+
+        # Multi-mode sorting
+        sort_mode = self.sort_by_mode
+        if sort_mode == "Overall (Low -> High)":
+            filtered.sort(key=lambda x: (x["overall"], x["potential"]))
+        elif sort_mode == "Potential (High -> Low)":
+            filtered.sort(key=lambda x: (x["potential"], x["overall"]), reverse=True)
+        elif sort_mode == "Name (A -> Z)":
+            filtered.sort(key=lambda x: x["name"].lower())
+        elif sort_mode == "Age (Young -> Old)":
+            filtered.sort(key=lambda x: (x.get("age", 25), -x["overall"]))
+        elif sort_mode == "Age (Old -> Young)":
+            filtered.sort(key=lambda x: (-x.get("age", 25), -x["overall"]))
+        elif sort_mode == "Player ID":
+            filtered.sort(key=lambda x: x["playerid"])
+        else:
+            filtered.sort(key=lambda x: (x["overall"], x["potential"]), reverse=True)
 
         self.filtered_players = filtered
         items = []
@@ -1468,13 +1663,40 @@ class SquadEditorApp:
             dpg.set_value("player_count_label", f"Total Players: {len(self.filtered_players):,} matches")
 
     def _on_clear_player_search(self):
-        dpg.set_value("player_search_input", "")
         self.filter_pos_category = "All"
         self.min_ovr_filter = 0
+        self.max_ovr_filter = 99
         self.filter_preset = "All Players"
-        dpg.set_value("player_preset_combo", "All Players")
-        dpg.set_value("player_pos_combo", "All")
-        dpg.set_value("player_min_ovr_slider", 0)
+        self.filter_league = "All Leagues"
+        self.filter_club = "All Clubs"
+        self.filter_nation = "All Nations"
+        self.filter_foot = "Any"
+        self.filter_age_bracket = "Any Age"
+        self.sort_by_mode = "Overall (High -> Low)"
+
+        if dpg.does_item_exist("player_search_input"):
+            dpg.set_value("player_search_input", "")
+        if dpg.does_item_exist("player_preset_combo"):
+            dpg.set_value("player_preset_combo", "All Players")
+        if dpg.does_item_exist("player_sort_combo"):
+            dpg.set_value("player_sort_combo", "Overall (High -> Low)")
+        if dpg.does_item_exist("player_pos_combo"):
+            dpg.set_value("player_pos_combo", "All")
+        if dpg.does_item_exist("player_foot_combo"):
+            dpg.set_value("player_foot_combo", "Any")
+        if dpg.does_item_exist("player_age_combo"):
+            dpg.set_value("player_age_combo", "Any Age")
+        if dpg.does_item_exist("player_league_filter_combo"):
+            dpg.set_value("player_league_filter_combo", "All Leagues")
+        if dpg.does_item_exist("player_nation_filter_combo"):
+            dpg.set_value("player_nation_filter_combo", "All Nations")
+        self._refresh_club_filter_combo()
+        if dpg.does_item_exist("player_club_filter_combo"):
+            dpg.set_value("player_club_filter_combo", "All Clubs")
+        if dpg.does_item_exist("player_min_ovr_slider"):
+            dpg.set_value("player_min_ovr_slider", 0)
+        if dpg.does_item_exist("player_max_ovr_slider"):
+            dpg.set_value("player_max_ovr_slider", 99)
         self._on_filter_players()
 
     def _on_change_pos_filter(self, sender, app_data):
@@ -1744,7 +1966,10 @@ class SquadEditorApp:
             dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
             is_trans = pid in self.session.user_transfers
             trans_tag = " [TRANSFERRED]" if is_trans else ""
-            dpg.set_value("player_sub_header", f"Club: {p['club']}{trans_tag}  |  Kit: #{jersey_num}  |  Position: {p['position']}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}*  |  Weak Foot: {p.get('weak_foot', 3)}*")
+            lg_part = f" ({p['league']})" if p.get("league") else ""
+            nat_part = f"  |  Nation: {p['nation_name']}" if p.get("nation_name") else ""
+            alt_part = f" [{p['alt_positions']}]" if p.get("alt_positions") else ""
+            dpg.set_value("player_sub_header", f"Club: {p['club']}{lg_part}{trans_tag}{nat_part}  |  Pos: {p['position']}{alt_part}  |  Foot: {p.get('foot', 'Right')}  |  Skills: {p.get('skills', 3)}*  |  WF: {p.get('weak_foot', 3)}*")
 
             # Update player miniface texture
             p_tex = self.assets.get_player_texture(pid, p["name"], jersey_num, ovr, p["position"])

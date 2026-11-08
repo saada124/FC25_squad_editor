@@ -52,6 +52,9 @@ class SquadsSession:
         self.user_jerseys: Dict[int, int] = {}
         self.base_team_lookup: Dict[int, int] = {}
         self.base_jersey_lookup: Dict[int, int] = {}
+        self.team_to_league: Dict[int, str] = {}
+        self.all_leagues: List[str] = []
+        self.all_nations: List[str] = []
         self.change_tracker: ChangeTracker = ChangeTracker()
 
         # Pre-load player presets from Live Editor database
@@ -195,7 +198,10 @@ class SquadsSession:
                             p["base_teamid"] = tid
                             p["base_club"] = cname
                             self.base_team_lookup[pid] = tid
-                        p["league"] = cdata.get("league", "")
+                        lg = cdata.get("league", "")
+                        if tid > 0 and lg and tid not in self.team_to_league:
+                            self.team_to_league[tid] = lg
+                        p["league"] = lg
                         p["nation_name"] = cdata.get("nation", "")
                         p["alt_positions"] = cdata.get("alt_pos", "")
                         p["playstyles_str"] = cdata.get("playstyles", "")
@@ -223,6 +229,32 @@ class SquadsSession:
                         self.players_lookup[pid].setdefault("stats", {})["jerseynumber"] = str(num_int)
             except Exception:
                 pass
+
+        self._refresh_league_and_nation_lists(self.players_lookup.values())
+
+    def _refresh_league_and_nation_lists(self, player_records):
+        """Builds prioritized lists of all unique leagues and nations across the given player records."""
+        leagues_set = {p.get("league", "") for p in player_records if p.get("league")}
+        nations_set = {p.get("nation_name", "") for p in player_records if p.get("nation_name")}
+
+        top_leagues = [
+            "Premier League", "LALIGA EA SPORTS", "Bundesliga", "Serie A Enilive",
+            "Ligue 1 McDonald's", "EFL Championship", "MLS", "ROSHN Saudi League",
+            "Eredivisie", "Liga Portugal", "Barclays WSL", "Liga F",
+            "Frauen-Bundesliga", "Arkema PL", "NWSL"
+        ]
+        ordered_leagues = [lg for lg in top_leagues if lg in leagues_set]
+        ordered_leagues.extend(sorted(leagues_set - set(ordered_leagues)))
+        self.all_leagues = ordered_leagues
+
+        top_nations = [
+            "England", "France", "Spain", "Germany", "Brazil", "Argentina",
+            "Portugal", "Italy", "Netherlands", "Belgium", "Croatia",
+            "Uruguay", "Colombia", "United States", "Japan", "Morocco"
+        ]
+        ordered_nations = [nt for nt in top_nations if nt in nations_set]
+        ordered_nations.extend(sorted(nations_set - set(ordered_nations)))
+        self.all_nations = ordered_nations
 
     def load_squads_file(self, filepath: str) -> Tuple[bool, str]:
         """
@@ -384,31 +416,51 @@ class SquadsSession:
                 stats["jerseynumber"] = str(self.get_player_jersey_number(pid))
             b_day = 1
             b_mon = 1
-            bdate_str = str(stats.get("birthdate", ""))
+            age_val = 25
+            bdate_str = str(stats.get("birthdate", "")).strip()
             if "-" in bdate_str:
                 parts = bdate_str.split("-")
                 try:
                     if len(parts) >= 3:
+                        b_yr = int(parts[0])
                         b_mon = int(parts[1])
                         b_day = int(parts[2])
+                        age_val = max(15, min(55, 2024 - b_yr - (1 if (b_mon, b_day) > (9, 1) else 0)))
                 except Exception:
                     pass
-            
+            elif bdate_str.isdigit():
+                try:
+                    import datetime
+                    days_val = int(bdate_str)
+                    if 100000 < days_val < 200000:
+                        bdate = datetime.date(1582, 10, 14) + datetime.timedelta(days=days_val)
+                        b_mon = bdate.month
+                        b_day = bdate.day
+                        age_val = max(15, min(55, 2024 - bdate.year - (1 if (b_mon, b_day) > (9, 1) else 0)))
+                except Exception:
+                    pass
+            if "age" in stats and str(stats["age"]).isdigit():
+                try:
+                    age_val = int(stats["age"])
+                except Exception:
+                    pass
+
             try:
                 nat_id = int(stats.get("nationality", 0))
             except Exception:
                 nat_id = 0
                 
             try:
-                age_val = int(stats.get("age", 25))
-            except Exception:
-                age_val = 25
-                
-            try:
                 is_ret = int(stats.get("isretiring", 0))
             except Exception:
                 is_ret = 0
             
+            nation_str = pdata.get("nation_name", "") or (get_nation_name(nat_id) if nat_id > 0 else "")
+            if nation_str.startswith("Nation #"):
+                nation_str = ""
+            league_str = pdata.get("league", "") or self.team_to_league.get(tid, "")
+            alt_pos_str = pdata.get("alt_positions", "")
+
             entry = {
                 "playerid": pid,
                 "name": pdata["name"],
@@ -416,9 +468,12 @@ class SquadsSession:
                 "potential": pot,
                 "position": pos_name,
                 "pos_code": pos_code,
+                "alt_positions": alt_pos_str,
                 "club": club_name,
                 "teamid": tid,
+                "league": league_str,
                 "nationality": nat_id,
+                "nation_name": nation_str,
                 "age": age_val,
                 "birth_day": b_day,
                 "birth_month": b_mon,
@@ -435,6 +490,9 @@ class SquadsSession:
                 "table_sname": "CZUM"
             }
             self.players_cache.append(entry)
+
+        # Build sorted lists of all available leagues and nations
+        self._refresh_league_and_nation_lists(self.players_cache)
 
         # Sort players by overall rating descending so superstars appear first
         self.players_cache.sort(key=lambda p: (p["overall"], p["potential"]), reverse=True)
@@ -486,6 +544,7 @@ class SquadsSession:
                         self.teams_cache.append({
                             "teamid": tid,
                             "name": formatted_name,
+                            "league": self.team_to_league.get(tid, ""),
                             "stadium": stadium_name,
                             "manager_name": mgr_name,
                             "manager_asset_id": mgr_asset_id,
@@ -660,6 +719,7 @@ class SquadsSession:
                 old_team = p["teamid"]
                 p["teamid"] = target_tid
                 p["club"] = club_name
+                p["league"] = self.team_to_league.get(target_tid, "") if target_tid > 0 else ""
                 
                 # Update team_rosters
                 if old_team in self.team_rosters and player_id in self.team_rosters[old_team]:
@@ -1096,6 +1156,42 @@ class SquadsSession:
         if not tbl:
             return False, f"Table '{table_sname}' not found in active database.", 0
         return tbl.export_to_csv(target_path, include_labels)
+
+    def export_players_list_csv(self, players_list: List[Dict[str, Any]], target_path: str) -> Tuple[bool, str, int]:
+        """Exports a list of filtered players with full bio, club, league, nation, and ratings to CSV."""
+        try:
+            headers = [
+                "playerid", "name", "overall", "potential", "position", "alt_positions",
+                "club", "teamid", "league", "nation_name", "age", "foot", "skills",
+                "weak_foot", "height", "weight", "jerseynumber"
+            ]
+            with open(target_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for p in players_list:
+                    jersey = p.get("stats", {}).get("jerseynumber", "") or self.get_player_jersey_number(p.get("playerid", 0))
+                    writer.writerow([
+                        p.get("playerid", 0),
+                        p.get("name", ""),
+                        p.get("overall", 0),
+                        p.get("potential", 0),
+                        p.get("position", ""),
+                        p.get("alt_positions", ""),
+                        p.get("club", ""),
+                        p.get("teamid", 0),
+                        p.get("league", ""),
+                        p.get("nation_name", ""),
+                        p.get("age", 25),
+                        p.get("foot", "Right"),
+                        p.get("skills", 3),
+                        p.get("weak_foot", 3),
+                        p.get("height", 180),
+                        p.get("weight", 75),
+                        jersey
+                    ])
+            return True, f"Exported {len(players_list):,} players to {os.path.basename(target_path)}", len(players_list)
+        except Exception as e:
+            return False, f"Failed to export players CSV: {e}", 0
 
     def import_table_csv(self, table_sname: str, source_path: str) -> Tuple[bool, str, Dict[str, Any]]:
         """
