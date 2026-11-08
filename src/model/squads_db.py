@@ -10,6 +10,7 @@ try:
     from core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
     from core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
     from core.change_tracker import ChangeTracker, ChangeEntry
+    from core.formations import FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION, get_formation_slots, get_slot_category_color, get_ovr_tier_color
 except ImportError:
     from src.core.backup import create_load_backup, list_folder_backups, purge_old_backups, get_folder_backups_summary
     from src.core.fbchunks import FBChunksContainer
@@ -17,6 +18,7 @@ except ImportError:
     from src.core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
     from src.core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
     from src.core.change_tracker import ChangeTracker, ChangeEntry
+    from src.core.formations import FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION, get_formation_slots, get_slot_category_color, get_ovr_tier_color
 
 def get_base_dir() -> str:
     """Returns application directory whether running as script or frozen PyInstaller exe."""
@@ -55,6 +57,9 @@ class SquadsSession:
         self.team_to_league: Dict[int, str] = {}
         self.all_leagues: List[str] = []
         self.all_nations: List[str] = []
+        self.team_to_ridx: Dict[int, int] = {}
+        self.ridx_to_team: Dict[int, int] = {}
+        self.team_lineups: Dict[int, Dict[str, Any]] = {}
         self.change_tracker: ChangeTracker = ChangeTracker()
 
         # Pre-load player presets from Live Editor database
@@ -267,6 +272,7 @@ class SquadsSession:
                 self.backup_path, backup_msg = create_load_backup(filepath, auto_prune=True, max_retain=max_backups_retain)
             else:
                 self.backup_path = None
+                backup_msg = ""
                 if max_backups_retain is not None and max_backups_retain < 999:
                     purge_old_backups(filepath, keep_last=max_backups_retain)
             
@@ -280,6 +286,9 @@ class SquadsSession:
             lyxl = self.db.tables_map.get("lyxL")
             kisl = self.db.tables_map.get("kISL")
             col_dmls = kisl.columns_map.get("DmlS") if kisl else None
+            self.team_to_ridx.clear()
+            self.ridx_to_team.clear()
+            self.team_lineups.clear()
             if lyxl and "IOSv" in lyxl.columns_map:
                 col_tname = lyxl.columns_map["IOSv"]
                 for r_idx, rec in enumerate(lyxl.records):
@@ -294,6 +303,8 @@ class SquadsSession:
                             tid = 0
                     if tid <= 0:
                         tid = r_idx + 1
+                    self.team_to_ridx[tid] = r_idx
+                    self.ridx_to_team[r_idx] = tid
                     TEAM_NAMES[tid] = format_team_display_name(tid, tname, r_idx)
 
             # 4. Index high-level entities
@@ -846,8 +857,24 @@ class SquadsSession:
             
         # Default roles based on player overall ratings
         sorted_pids = sorted(roster, key=lambda pid: self.players_lookup.get(pid, {}).get("overall", 60), reverse=True)
+        
+        # Check if table lyxL has authentic captain in WLKn
+        r_idx = self.team_to_ridx.get(team_id)
+        lyxl = self.db.tables_map.get("lyxL")
+        captain_id = 0
+        if lyxl and r_idx is not None and r_idx < len(lyxl.records):
+            if "WLKn" in lyxl.columns_map:
+                try:
+                    c_val = int(lyxl.columns_map["WLKn"].decode_value(lyxl.records[r_idx]) or 0)
+                    if c_val in roster:
+                        captain_id = c_val
+                except Exception:
+                    pass
+        if captain_id == 0:
+            captain_id = sorted_pids[0]
+
         roles = {
-            "captain": sorted_pids[0],
+            "captain": captain_id,
             "penalty": sorted_pids[0],
             "freekick_short": sorted_pids[1] if len(sorted_pids) > 1 else sorted_pids[0],
             "freekick_long": sorted_pids[2] if len(sorted_pids) > 2 else sorted_pids[0],
@@ -860,7 +887,330 @@ class SquadsSession:
     def set_team_squad_roles(self, team_id: int, roles: Dict[str, int]) -> bool:
         """Saves squad roles for a club."""
         self.team_squad_roles[team_id] = roles
+        if "captain" in roles:
+            self.set_team_captain(team_id, roles["captain"], record_change=False)
         return True
+
+    def get_team_lineup(self, team_id: int) -> Dict[str, Any]:
+        """
+        Retrieves or builds the active tactical lineup for a team.
+        Returns a dict:
+        {
+            'formation': '4-3-3',
+            'starting_xi': [pid0, pid1, ... pid10], # 11 slots
+            'bench': [pid11, ...], # up to 9 subs
+            'reserves': [pid20, ...] # remaining players
+        }
+        """
+        if team_id in self.team_lineups:
+            lineup = self.team_lineups[team_id]
+            current_roster = set(self.team_rosters.get(team_id, []))
+            starting_xi = [p for p in lineup.get("starting_xi", []) if p in current_roster]
+            bench = [p for p in lineup.get("bench", []) if p in current_roster]
+            reserves = [p for p in lineup.get("reserves", []) if p in current_roster]
+            assigned = set(starting_xi) | set(bench) | set(reserves)
+            for p in self.team_rosters.get(team_id, []):
+                if p not in assigned:
+                    reserves.append(p)
+            lineup["starting_xi"] = starting_xi
+            lineup["bench"] = bench
+            lineup["reserves"] = reserves
+            while len(lineup["starting_xi"]) < 11 and (lineup["bench"] or lineup["reserves"]):
+                if lineup["bench"]:
+                    lineup["starting_xi"].append(lineup["bench"].pop(0))
+                elif lineup["reserves"]:
+                    lineup["starting_xi"].append(lineup["reserves"].pop(0))
+            return lineup
+
+        return self._build_initial_team_lineup(team_id)
+
+    def _build_initial_team_lineup(self, team_id: int) -> Dict[str, Any]:
+        """
+        Constructs the authentic starting XI, bench, and reserves for a club using
+        the formation read from mDGw.MZIF and the position-weighted autofit engine.
+        """
+        formation_name = DEFAULT_FORMATION
+        r_idx = self.team_to_ridx.get(team_id)
+        mdgw = self.db.tables_map.get("mDGw")
+        if mdgw and r_idx is not None and r_idx < len(mdgw.records):
+            col_m = mdgw.columns_map.get("MZIF")
+            if col_m:
+                val = col_m.decode_value(mdgw.records[r_idx])
+                if val and val.strip() in FORMATIONS:
+                    formation_name = val.strip()
+
+        slots = get_formation_slots(formation_name)
+        roster = list(self.team_rosters.get(team_id, []))
+        
+        players = [self.players_lookup[pid] for pid in roster if pid in self.players_lookup]
+        players.sort(key=lambda p: p.get("overall", 60), reverse=True)
+        
+        assigned_xi = [0] * 11
+        remaining_pids = [p["playerid"] for p in players]
+        
+        # Phase 1: Match Goalkeeper (slot 0)
+        gk_cand = next((pid for pid in remaining_pids if self.players_lookup[pid].get("pos_code") == 0), None)
+        if gk_cand:
+            assigned_xi[0] = gk_cand
+            remaining_pids.remove(gk_cand)
+            
+        # Phase 2: Exact primary position match for outfield slots (1 to 10)
+        for i in range(1, 11):
+            if i >= len(slots):
+                break
+            slot = slots[i]
+            pref = slot.get("preferred_pos", [])
+            cand = next((pid for pid in remaining_pids if self.players_lookup[pid].get("pos_code") in pref), None)
+            if cand:
+                assigned_xi[i] = cand
+                remaining_pids.remove(cand)
+
+        # Phase 3: Secondary / Alternate position match for unassigned slots
+        for i in range(1, 11):
+            if assigned_xi[i] == 0:
+                slot = slots[i]
+                slot_name = slot.get("name", "")
+                cand = None
+                for pid in remaining_pids:
+                    pinfo = self.players_lookup[pid]
+                    alt = pinfo.get("alt_positions", "") or ""
+                    if slot_name in alt or (alt and any(s in alt for s in ["CB", "LB", "RB", "CM", "CAM", "ST"] if s in slot_name)):
+                        cand = pid
+                        break
+                if cand:
+                    assigned_xi[i] = cand
+                    remaining_pids.remove(cand)
+
+        # Phase 4: Fill remaining unfilled slots with highest OVR outfield players
+        for i in range(11):
+            if assigned_xi[i] == 0 and remaining_pids:
+                assigned_xi[i] = remaining_pids.pop(0)
+
+        starting_xi = [pid for pid in assigned_xi if pid > 0]
+        bench = remaining_pids[:9]
+        reserves = remaining_pids[9:]
+
+        lineup = {
+            "formation": formation_name,
+            "starting_xi": starting_xi,
+            "bench": bench,
+            "reserves": reserves,
+        }
+        self.team_lineups[team_id] = lineup
+        return lineup
+
+    def swap_lineup_players(
+        self,
+        team_id: int,
+        slot_type_a: str,
+        idx_a: int,
+        slot_type_b: str,
+        idx_b: int,
+        record_change: bool = True
+    ) -> Tuple[bool, str]:
+        """
+        Executes an atomic swap between two players across starting_xi, bench, or reserves.
+        """
+        lineup = self.get_team_lineup(team_id)
+        list_a = lineup.get(slot_type_a)
+        list_b = lineup.get(slot_type_b)
+        
+        if list_a is None or list_b is None:
+            return False, f"Invalid slot types: {slot_type_a}, {slot_type_b}"
+            
+        if idx_a < 0 or idx_a >= len(list_a) or idx_b < 0 or idx_b >= len(list_b):
+            return False, f"Invalid swap indices: {idx_a}, {idx_b}"
+            
+        pid_a = list_a[idx_a]
+        pid_b = list_b[idx_b]
+        
+        if pid_a == pid_b and slot_type_a == slot_type_b:
+            return False, "Cannot swap player with themselves"
+            
+        # Execute swap
+        list_a[idx_a], list_b[idx_b] = list_b[idx_b], list_a[idx_a]
+        
+        name_a = self.players_lookup.get(pid_a, {}).get("name", f"Player #{pid_a}")
+        name_b = self.players_lookup.get(pid_b, {}).get("name", f"Player #{pid_b}")
+        team_name = get_team_name(team_id)
+        
+        slots = get_formation_slots(lineup.get("formation", DEFAULT_FORMATION))
+        label_a = slots[idx_a]["name"] if slot_type_a == "starting_xi" and idx_a < len(slots) else f"{slot_type_a} #{idx_a+1}"
+        label_b = slots[idx_b]["name"] if slot_type_b == "starting_xi" and idx_b < len(slots) else f"{slot_type_b} #{idx_b+1}"
+        
+        if record_change:
+            self.change_tracker.record_change(
+                category="lineup",
+                title=f"{team_name} Lineup Swap",
+                entity_id=team_id,
+                field_name=f"swap_{pid_a}_{pid_b}",
+                field_label="Tactical Lineup Swap",
+                old_val=f"{name_a} at {label_a}, {name_b} at {label_b}",
+                new_val=f"{name_b} at {label_a}, {name_a} at {label_b}",
+                old_disp=f"{name_a} [{label_a}] <-> {name_b} [{label_b}]",
+                new_disp=f"{name_b} [{label_a}] <-> {name_a} [{label_b}]",
+                revert_fn=lambda: self.swap_lineup_players(team_id, slot_type_b, idx_b, slot_type_a, idx_a, record_change=False)[0]
+            )
+            
+        return True, f"Swapped {name_a} ({label_a}) with {name_b} ({label_b})"
+
+    def set_team_formation(self, team_id: int, new_formation: str, record_change: bool = True) -> Tuple[bool, str]:
+        """
+        Updates the active tactical formation for a team and persists the change to mDGw.MZIF.
+        """
+        if new_formation not in FORMATIONS:
+            return False, f"Unknown formation: {new_formation}"
+            
+        lineup = self.get_team_lineup(team_id)
+        old_formation = lineup.get("formation", DEFAULT_FORMATION)
+        
+        if old_formation == new_formation:
+            return True, "Formation already set"
+            
+        lineup["formation"] = new_formation
+        team_name = get_team_name(team_id)
+        
+        # Persist to table mDGw
+        r_idx = self.team_to_ridx.get(team_id)
+        mdgw = self.db.tables_map.get("mDGw")
+        if mdgw and r_idx is not None and r_idx < len(mdgw.records):
+            col_m = mdgw.columns_map.get("MZIF")
+            if col_m:
+                col_m.encode_value(mdgw.records[r_idx], new_formation)
+                
+        if record_change:
+            self.change_tracker.record_change(
+                category="tactics",
+                title=f"{team_name} Formation",
+                entity_id=team_id,
+                field_name="formation",
+                field_label="Tactical Formation",
+                old_val=old_formation,
+                new_val=new_formation,
+                old_disp=old_formation,
+                new_disp=new_formation,
+                revert_fn=lambda: self.set_team_formation(team_id, old_formation, record_change=False)[0]
+            )
+            
+        return True, f"Formation updated to {new_formation}"
+
+    def get_team_tactics(self, team_id: int) -> Dict[str, Any]:
+        """
+        Reads team tactical sliders and profile settings from mDGw and lyxL.
+        """
+        r_idx = self.team_to_ridx.get(team_id)
+        mdgw = self.db.tables_map.get("mDGw")
+        lyxl = self.db.tables_map.get("lyxL")
+        
+        depth = 0.50
+        def_width = 0.50
+        off_width = 0.50
+        tempo = 0.50
+        passing = 0.50
+        pressure = 0.50
+        def_style = 2
+        captain_id = 0
+        
+        if mdgw and r_idx is not None and r_idx < len(mdgw.records):
+            rec = mdgw.records[r_idx]
+            if "Gtld" in mdgw.columns_map: depth = float(mdgw.columns_map["Gtld"].decode_value(rec) or 0.50)
+            if "cLmS" in mdgw.columns_map: def_width = float(mdgw.columns_map["cLmS"].decode_value(rec) or 0.50)
+            if "jIiE" in mdgw.columns_map: off_width = float(mdgw.columns_map["jIiE"].decode_value(rec) or 0.50)
+            if "Iwmo" in mdgw.columns_map: tempo = float(mdgw.columns_map["Iwmo"].decode_value(rec) or 0.50)
+            if "DahS" in mdgw.columns_map: passing = float(mdgw.columns_map["DahS"].decode_value(rec) or 0.50)
+            if "ZBMA" in mdgw.columns_map: pressure = float(mdgw.columns_map["ZBMA"].decode_value(rec) or 0.50)
+            if "QraJ" in mdgw.columns_map: def_style = int(mdgw.columns_map["QraJ"].decode_value(rec) or 2)
+            
+        if lyxl and r_idx is not None and r_idx < len(lyxl.records):
+            if "WLKn" in lyxl.columns_map:
+                captain_id = int(lyxl.columns_map["WLKn"].decode_value(lyxl.records[r_idx]) or 0)
+                
+        return {
+            "defensive_depth": max(0.0, min(1.0, depth)),
+            "defensive_width": max(0.0, min(1.0, def_width)),
+            "offensive_width": max(0.0, min(1.0, off_width)),
+            "buildup_tempo": max(0.0, min(1.0, tempo)),
+            "passing_directness": max(0.0, min(1.0, passing)),
+            "pressure_intensity": max(0.0, min(1.0, pressure)),
+            "defensive_style": max(1, min(5, def_style)),
+            "captain_id": captain_id,
+        }
+
+    def set_team_tactics(self, team_id: int, record_change: bool = True, **kwargs) -> Tuple[bool, str]:
+        """
+        Updates tactical sliders in mDGw and persists changes.
+        """
+        r_idx = self.team_to_ridx.get(team_id)
+        mdgw = self.db.tables_map.get("mDGw")
+        if not mdgw or r_idx is None or r_idx >= len(mdgw.records):
+            return False, "Tactical profile not found for team"
+            
+        rec = mdgw.records[r_idx]
+        col_map = {
+            "defensive_depth": "Gtld",
+            "defensive_width": "cLmS",
+            "offensive_width": "jIiE",
+            "buildup_tempo": "Iwmo",
+            "passing_directness": "DahS",
+            "pressure_intensity": "ZBMA",
+            "defensive_style": "QraJ",
+        }
+        
+        team_name = get_team_name(team_id)
+        
+        for key, val in kwargs.items():
+            col_name = col_map.get(key)
+            if col_name and col_name in mdgw.columns_map:
+                col = mdgw.columns_map[col_name]
+                old_val = col.decode_value(rec)
+                col.encode_value(rec, val)
+                if record_change and str(old_val) != str(val):
+                    self.change_tracker.record_change(
+                        category="tactics",
+                        title=f"{team_name} Tactics",
+                        entity_id=team_id,
+                        field_name=key,
+                        field_label=key.replace("_", " ").title(),
+                        old_val=old_val,
+                        new_val=val,
+                        revert_fn=lambda k=key, v=old_val: self.set_team_tactics(team_id, record_change=False, **{k: v})[0]
+                    )
+        return True, "Tactics updated successfully"
+
+    def set_team_captain(self, team_id: int, player_id: int, record_change: bool = True) -> Tuple[bool, str]:
+        """
+        Updates team captain in lyxL.WLKn.
+        """
+        r_idx = self.team_to_ridx.get(team_id)
+        lyxl = self.db.tables_map.get("lyxL")
+        if not lyxl or r_idx is None or r_idx >= len(lyxl.records):
+            return False, "Team record not found"
+            
+        col_w = lyxl.columns_map.get("WLKn")
+        if not col_w:
+            return False, "Captain column not found"
+            
+        old_pid = int(col_w.decode_value(lyxl.records[r_idx]) or 0)
+        col_w.encode_value(lyxl.records[r_idx], player_id)
+        
+        team_name = get_team_name(team_id)
+        new_name = self.players_lookup.get(player_id, {}).get("name", f"Player #{player_id}")
+        old_name = self.players_lookup.get(old_pid, {}).get("name", f"Player #{old_pid}")
+        
+        if record_change and old_pid != player_id:
+            self.change_tracker.record_change(
+                category="roles",
+                title=f"{team_name} Captain",
+                entity_id=team_id,
+                field_name="captain",
+                field_label="Team Captain",
+                old_val=old_pid,
+                new_val=player_id,
+                old_disp=old_name,
+                new_disp=new_name,
+                revert_fn=lambda: self.set_team_captain(team_id, old_pid, record_change=False)[0]
+            )
+        return True, f"Captain set to {new_name}"
 
     def get_player_jersey_number(self, player_id: int) -> int:
         """Returns authentic squad jersey number (1-99) for a player."""

@@ -22,6 +22,10 @@ try:
     from core.settings import AppSettings
     from core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
     from core.assets import AssetManager
+    from core.formations import (
+        FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION,
+        get_formation_slots, get_slot_category_color, get_ovr_tier_color
+    )
 except ImportError:
     from src.model.squads_db import SquadsSession
     from src.core.schema import (
@@ -37,6 +41,10 @@ except ImportError:
     from src.core.settings import AppSettings
     from src.core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
     from src.core.assets import AssetManager
+    from src.core.formations import (
+        FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION,
+        get_formation_slots, get_slot_category_color, get_ovr_tier_color
+    )
 
 class SquadEditorApp:
     def __init__(self):
@@ -58,6 +66,10 @@ class SquadEditorApp:
         self.selected_team_roster_pid: Optional[int] = None
         self.filtered_sign_players: List[Dict[str, Any]] = []
         self.selected_sign_player: Optional[Dict[str, Any]] = None
+        
+        # Visual Lineup & Formation Manager State
+        self.selected_swap_slot: Optional[tuple] = None  # (slot_type, index, pid)
+        self.pitch_slots_bounds: List[Dict[str, Any]] = []
         
         # Filtered lists & Presets (Clean ASCII/Unicode labels)
         self.filtered_players: List[Dict[str, Any]] = []
@@ -200,6 +212,9 @@ class SquadEditorApp:
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (200, 50, 50, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (230, 70, 70, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
+
+        with dpg.item_handler_registry(tag="pitch_click_handler"):
+            dpg.add_item_clicked_handler(callback=self._on_pitch_clicked)
 
     def _build_ui(self):
         self.assets.init_dpg_textures()
@@ -775,29 +790,117 @@ class SquadEditorApp:
                     dpg.add_spacer(height=10)
                     dpg.add_separator()
 
-                    # Squad Roster Header & Sign Player Action
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Club Squad Roster", color=(0, 200, 255))
-                        dpg.add_spacer(width=160)
-                        dpg.add_button(label="[+] Sign Player to Club", callback=self._on_open_sign_player_modal, width=190)
+                    # Visual Tactical Studio & Lineup Suite
+                    with dpg.tab_bar(tag="team_inspector_tabs"):
+                        with dpg.tab(label=" Tactical Pitch & Lineup "):
+                            dpg.add_spacer(height=4)
+                            # Toolbar: Formation, Reset Lineup, Sign Player, Release Player
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Formation:")
+                                dpg.add_combo(items=FORMATION_NAMES, default_value=DEFAULT_FORMATION, tag="lineup_formation_selector", callback=self._on_change_team_formation, width=130)
+                                dpg.add_spacer(width=8)
+                                dpg.add_button(label="Reset to Default", callback=self._on_reset_team_lineup, width=125)
+                                dpg.add_spacer(width=10)
+                                dpg.add_button(label="[+] Sign Player", callback=self._on_open_sign_player_modal, width=120)
+                                dpg.add_button(label="[X] Release Selected", callback=self._on_release_roster_player, width=145)
 
-                    dpg.add_text("Click a player below to edit shirt number or release to free agents:", color=(160, 160, 160))
-                    dpg.add_listbox(items=[], num_items=14, tag="team_roster_listbox", callback=self._on_select_team_roster_player, width=620)
+                            # Active Swap Status Banner
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Click any player on the pitch or bench to select and swap positions.", tag="lineup_status_banner", color=(0, 200, 255))
+                                dpg.add_button(label="Cancel Swap", tag="lineup_cancel_btn", show=False, callback=self._on_cancel_lineup_swap, width=95)
 
-                    # Selected Player Roster Management Card
-                    with dpg.group(tag="team_roster_player_actions", show=False):
-                        dpg.add_spacer(height=6)
-                        with dpg.group(horizontal=True):
-                            dpg.add_image("tex_default_player", width=50, height=50, tag="roster_player_miniface_img")
-                            dpg.add_spacer(width=8)
-                            with dpg.group():
-                                dpg.add_text("Managing: None", tag="team_roster_player_title", color=(0, 255, 180))
+                            dpg.add_spacer(height=4)
+                            # Pitch Canvas on Left | Dugout (Bench & Reserves) on Right
+                            with dpg.group(horizontal=True):
+                                with dpg.group():
+                                    dpg.add_drawlist(width=440, height=530, tag="pitch_drawlist")
+                                    dpg.bind_item_handler_registry("pitch_drawlist", "pitch_click_handler")
+
+                                dpg.add_spacer(width=10)
+                                with dpg.group():
+                                    dpg.add_text("Substitutes Bench (9)", color=(0, 230, 160))
+                                    with dpg.child_window(width=340, height=250, tag="bench_container"):
+                                        pass
+
+                                    dpg.add_spacer(height=6)
+                                    dpg.add_text("Reserves Squad", color=(180, 190, 205))
+                                    with dpg.child_window(width=340, height=225, tag="reserves_container"):
+                                        pass
+
+                        with dpg.tab(label=" Tactics & Roles (mDGw) "):
+                            dpg.add_spacer(height=6)
+                            dpg.add_text("Club Tactical Profile & Engine Sliders", color=(0, 220, 255))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Defensive Depth:     ")
+                                dpg.add_slider_float(tag="slider_depth", min_value=0.0, max_value=1.0, default_value=0.5, format="%.2f", width=220, callback=self._on_change_tactical_slider, user_data="defensive_depth")
+                                dpg.add_text("Deep Drop <-> High Line", color=(150, 150, 150))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Defensive Width:     ")
+                                dpg.add_slider_float(tag="slider_def_width", min_value=0.0, max_value=1.0, default_value=0.5, format="%.2f", width=220, callback=self._on_change_tactical_slider, user_data="defensive_width")
+                                dpg.add_text("Compact <-> Standard <-> Wide", color=(150, 150, 150))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Offensive Width:     ")
+                                dpg.add_slider_float(tag="slider_off_width", min_value=0.0, max_value=1.0, default_value=0.5, format="%.2f", width=220, callback=self._on_change_tactical_slider, user_data="offensive_width")
+                                dpg.add_text("Narrow <-> Balanced <-> Wide", color=(150, 150, 150))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Build-Up Play Tempo: ")
+                                dpg.add_slider_float(tag="slider_tempo", min_value=0.0, max_value=1.0, default_value=0.5, format="%.2f", width=220, callback=self._on_change_tactical_slider, user_data="buildup_tempo")
+                                dpg.add_text("Slow Control <-> Fast Direct", color=(150, 150, 150))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Passing Directness:  ")
+                                dpg.add_slider_float(tag="slider_passing", min_value=0.0, max_value=1.0, default_value=0.5, format="%.2f", width=220, callback=self._on_change_tactical_slider, user_data="passing_directness")
+                                dpg.add_text("Short Pass <-> Mixed <-> Direct", color=(150, 150, 150))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Pressure Intensity:  ")
+                                dpg.add_slider_float(tag="slider_pressure", min_value=0.0, max_value=1.0, default_value=0.5, format="%.2f", width=220, callback=self._on_change_tactical_slider, user_data="pressure_intensity")
+                                dpg.add_text("Low <-> High Intensity", color=(150, 150, 150))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Defensive Press Style:")
+                                dpg.add_combo(items=["1: Drop Back", "2: Balanced", "3: Pressure on Heavy Touch", "4: Press After Possession Loss", "5: Constant Pressure"], default_value="2: Balanced", tag="combo_def_style", callback=self._on_change_def_style, width=220)
+
+                            dpg.add_spacer(height=10)
+                            dpg.add_separator()
+                            dpg.add_spacer(height=6)
+                            dpg.add_text("Club Captain & Set-Piece Specialists", color=(0, 220, 255))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Team Captain:        ")
+                                dpg.add_combo(items=[], tag="combo_captain", callback=self._on_change_team_captain, width=280)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Penalty Specialist:  ")
+                                dpg.add_combo(items=[], tag="combo_penalty", callback=self._on_change_setpiece_taker, user_data="penalty", width=280)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Short Free Kicks:    ")
+                                dpg.add_combo(items=[], tag="combo_freekick_short", callback=self._on_change_setpiece_taker, user_data="freekick_short", width=280)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Long Free Kicks:     ")
+                                dpg.add_combo(items=[], tag="combo_freekick_long", callback=self._on_change_setpiece_taker, user_data="freekick_long", width=280)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Left Corner Taker:   ")
+                                dpg.add_combo(items=[], tag="combo_corner_left", callback=self._on_change_setpiece_taker, user_data="corner_left", width=280)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Right Corner Taker:  ")
+                                dpg.add_combo(items=[], tag="combo_corner_right", callback=self._on_change_setpiece_taker, user_data="corner_right", width=280)
+
+                            dpg.add_spacer(height=6)
+                            dpg.add_text("", tag="tactics_save_status", color=(0, 255, 120))
+
+                        with dpg.tab(label=" Roster List & Kit Numbers "):
+                            dpg.add_spacer(height=4)
+                            dpg.add_text("Full Club Roster List (Click player to manage kit number or release):", color=(160, 160, 160))
+                            dpg.add_listbox(items=[], num_items=12, tag="team_roster_listbox", callback=self._on_select_team_roster_player, width=620)
+                            with dpg.group(tag="team_roster_player_actions", show=False):
+                                dpg.add_spacer(height=6)
                                 with dpg.group(horizontal=True):
-                                    dpg.add_text("Jersey #: ")
-                                    dpg.add_input_int(tag="edit_team_roster_jersey_num", min_value=1, max_value=99, default_value=10, width=80)
-                                    dpg.add_button(label="Set #", callback=self._on_set_roster_jersey_num, width=70)
-                                    dpg.add_spacer(width=20)
-                                    dpg.add_button(label="[X] Release to Free Agents", callback=self._on_release_roster_player, width=200)
+                                    dpg.add_image("tex_default_player", width=50, height=50, tag="roster_player_miniface_img")
+                                    dpg.add_spacer(width=8)
+                                    with dpg.group():
+                                        dpg.add_text("Managing: None", tag="team_roster_player_title", color=(0, 255, 180))
+                                        with dpg.group(horizontal=True):
+                                            dpg.add_text("Jersey #: ")
+                                            dpg.add_input_int(tag="edit_team_roster_jersey_num", min_value=1, max_value=99, default_value=10, width=80)
+                                            dpg.add_button(label="Set #", callback=self._on_set_roster_jersey_num, width=70)
+                                            dpg.add_spacer(width=20)
+                                            dpg.add_button(label="[X] Release to Free Agents", callback=self._on_release_roster_player, width=200)
 
                     dpg.add_spacer(height=10)
                     dpg.add_text("", tag="team_save_feedback", color=(0, 255, 120))
@@ -2502,7 +2605,17 @@ class SquadEditorApp:
         if dpg.does_item_exist("team_manager_img"):
             dpg.configure_item("team_manager_img", texture_tag=mgr_tex)
 
+        self.selected_swap_slot = None
+        if dpg.does_item_exist("lineup_cancel_btn"):
+            dpg.configure_item("lineup_cancel_btn", show=False)
+        if dpg.does_item_exist("lineup_status_banner"):
+            dpg.set_value("lineup_status_banner", "Click any player on the pitch or bench to select and swap positions.")
+
         self._refresh_team_roster_display()
+        self._render_pitch_lineup(t["teamid"])
+        self._refresh_dugout_display(t["teamid"])
+        self._populate_team_tactics(t["teamid"])
+
         self.selected_team_roster_pid = None
         if dpg.does_item_exist("team_roster_player_actions"):
             dpg.configure_item("team_roster_player_actions", show=False)
@@ -2587,6 +2700,8 @@ class SquadEditorApp:
         self.selected_team_roster_pid = None
         dpg.configure_item("team_roster_player_actions", show=False)
         self._refresh_team_roster_display()
+        self._render_pitch_lineup(tid)
+        self._refresh_dugout_display(tid)
         self._on_filter_teams()
         self._on_filter_players()
         self._update_save_and_changes_toolbar()
@@ -2684,6 +2799,8 @@ class SquadEditorApp:
         
         dpg.configure_item("sign_player_modal", show=False)
         self._refresh_team_roster_display()
+        self._render_pitch_lineup(tid)
+        self._refresh_dugout_display(tid)
         self._on_filter_teams()
         self._on_filter_players()
         self._update_save_and_changes_toolbar()
@@ -2767,6 +2884,447 @@ class SquadEditorApp:
             dpg.configure_item("team_manager_img", texture_tag=mgr_tex)
         self._update_save_and_changes_toolbar()
         dpg.set_value("team_save_feedback", f"[OK] Manager details updated ({self.session.change_tracker.count} staged): {m_name} ({m_nat})")
+
+    # --- Visual Lineup, Formation & Tactical Studio Callbacks ---
+
+    def _get_short_player_name(self, name: str) -> str:
+        """Returns concise high-legibility player name for tactical card badges."""
+        if not name:
+            return ""
+        name = name.strip()
+        parts = name.split()
+        if len(parts) == 1:
+            return parts[0][:11]
+        if "Junior" in name or "Junior" in name or "Júnior" in name:
+            return f"{parts[0][:4]} Jr"
+        return f"{parts[0][0]}. {parts[-1]}"[:11]
+
+    def _render_pitch_lineup(self, team_id: int):
+        """Renders the authentic dual-tone turf pitch and 11 starting XI player badges."""
+        if not dpg.does_item_exist("pitch_drawlist"):
+            return
+            
+        lineup = self.session.get_team_lineup(team_id)
+        formation_name = lineup.get("formation", DEFAULT_FORMATION)
+        slots = get_formation_slots(formation_name)
+        starting_xi = lineup.get("starting_xi", [])
+        
+        # Sync formation dropdown
+        if dpg.does_item_exist("lineup_formation_selector"):
+            dpg.set_value("lineup_formation_selector", formation_name)
+            
+        captain_id = self.session.get_team_tactics(team_id).get("captain_id", 0)
+        
+        # Clear existing draw items
+        dpg.delete_item("pitch_drawlist", children_only=True)
+        self.pitch_slots_bounds.clear()
+        
+        # 1. Base Turf Grass
+        dpg.draw_rectangle((0, 0), (440, 530), fill=(16, 44, 24, 255), color=(0, 0, 0, 0), parent="pitch_drawlist")
+        
+        # 2. Alternating mowed stripes (8 stripes)
+        stripe_h = 530.0 / 8.0
+        for s_idx in range(8):
+            if s_idx % 2 == 0:
+                y_top = s_idx * stripe_h
+                y_bot = (s_idx + 1) * stripe_h
+                dpg.draw_rectangle((0, y_top), (440, y_bot), fill=(20, 56, 30, 255), color=(0, 0, 0, 0), parent="pitch_drawlist")
+                
+        # 3. Outer Chalk Boundary Line
+        chalk_col = (255, 255, 255, 175)
+        dpg.draw_rectangle((18, 18), (422, 512), color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        
+        # 4. Halfway line & Center Circle & Spot
+        dpg.draw_line((18, 265), (422, 265), color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((220, 265), 48, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((220, 265), 3, color=(255, 255, 255, 220), fill=(255, 255, 255, 220), parent="pitch_drawlist")
+        
+        # 5. Top Penalty Area (Attacking)
+        dpg.draw_rectangle((125, 18), (315, 110), color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_rectangle((170, 18), (270, 52), color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((220, 84), 3, color=(255, 255, 255, 220), fill=(255, 255, 255, 220), parent="pitch_drawlist")
+        # Penalty arc top
+        dpg.draw_circle((220, 84), 28, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        
+        # 6. Bottom Penalty Area (Defending/Home)
+        dpg.draw_rectangle((125, 420), (315, 512), color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_rectangle((170, 478), (270, 512), color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((220, 446), 3, color=(255, 255, 255, 220), fill=(255, 255, 255, 220), parent="pitch_drawlist")
+        # Penalty arc bottom
+        dpg.draw_circle((220, 446), 28, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        
+        # 7. Corner Arcs
+        dpg.draw_circle((18, 18), 12, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((422, 18), 12, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((18, 512), 12, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        dpg.draw_circle((422, 512), 12, color=chalk_col, thickness=1.5, parent="pitch_drawlist")
+        
+        # 8. Translucent Goal Nets
+        dpg.draw_rectangle((175, 5), (265, 18), color=(255, 255, 255, 70), fill=(255, 255, 255, 20), thickness=1, parent="pitch_drawlist")
+        dpg.draw_rectangle((175, 512), (265, 525), color=(255, 255, 255, 70), fill=(255, 255, 255, 20), thickness=1, parent="pitch_drawlist")
+        
+        # 9. Starting XI Tactical Cards
+        card_w = 82
+        card_h = 38
+        
+        for idx in range(11):
+            if idx >= len(slots):
+                break
+            slot = slots[idx]
+            rx = slot["rel_x"]
+            ry = slot["rel_y"]
+            slot_name = slot["name"]
+            category = slot["category"]
+            
+            cx = rx * 440.0
+            cy = ry * 530.0
+            bx = cx - card_w / 2.0
+            by = cy - card_h / 2.0
+            
+            pid = starting_xi[idx] if idx < len(starting_xi) else 0
+            
+            self.pitch_slots_bounds.append({
+                "bx": bx, "by": by, "bw": card_w, "bh": card_h,
+                "slot_idx": idx, "slot_name": slot_name, "pid": pid
+            })
+            
+            pdata = self.session.players_lookup.get(pid, {}) if pid > 0 else {}
+            pname = pdata.get("name", f"Player #{pid}" if pid > 0 else "[Empty]")
+            ovr = pdata.get("overall", 60) if pid > 0 else 0
+            jersey = self.session.get_player_jersey_number(pid) if pid > 0 else 0
+            
+            is_selected = (self.selected_swap_slot is not None and 
+                           self.selected_swap_slot[0] == "starting_xi" and 
+                           self.selected_swap_slot[1] == idx)
+                           
+            if is_selected:
+                border_col = (0, 240, 255, 255)
+                border_thick = 2.5
+                dpg.draw_rectangle((bx - 2, by - 2), (bx + card_w + 2, by + card_h + 2),
+                                   rounding=7, color=(0, 240, 255, 120), thickness=1.5, parent="pitch_drawlist")
+            else:
+                border_col = get_ovr_tier_color(ovr) if pid > 0 else (90, 95, 105, 255)
+                border_thick = 1.5
+                
+            # Card background
+            dpg.draw_rectangle((bx, by), (bx + card_w, by + card_h), rounding=5,
+                               fill=(18, 22, 30, 235), color=border_col, thickness=border_thick, parent="pitch_drawlist")
+                               
+            # Position pill
+            pill_col = get_slot_category_color(category)
+            dpg.draw_rectangle((bx + 3, by + 3), (bx + 28, by + 18), rounding=3,
+                               fill=pill_col, color=(0, 0, 0, 0), parent="pitch_drawlist")
+            dpg.draw_text((bx + 5, by + 3), slot_name[:4], size=11, color=(255, 255, 255, 255), parent="pitch_drawlist")
+            
+            # OVR score
+            if pid > 0:
+                dpg.draw_text((bx + 32, by + 3), str(ovr), size=13, color=get_ovr_tier_color(ovr), parent="pitch_drawlist")
+            else:
+                dpg.draw_text((bx + 32, by + 3), "--", size=13, color=(140, 140, 140, 255), parent="pitch_drawlist")
+                
+            # Captaincy indicator
+            if pid > 0 and pid == captain_id:
+                dpg.draw_text((bx + card_w - 13, by + 3), "C", size=11, color=(255, 215, 0, 255), parent="pitch_drawlist")
+                
+            # Player Name & Kit Number
+            if pid > 0:
+                short_name = self._get_short_player_name(pname)
+                display_name = f"#{jersey} {short_name}"
+            else:
+                display_name = "[Open Slot]"
+            dpg.draw_text((bx + 4, by + 21), display_name, size=11, color=(240, 245, 250, 255), parent="pitch_drawlist")
+
+    def _refresh_dugout_display(self, team_id: int):
+        """Populates the Substitutes Bench and Reserves panels."""
+        if not dpg.does_item_exist("bench_container") or not dpg.does_item_exist("reserves_container"):
+            return
+            
+        lineup = self.session.get_team_lineup(team_id)
+        bench = lineup.get("bench", [])
+        reserves = lineup.get("reserves", [])
+        
+        # 1. Populate Bench
+        dpg.delete_item("bench_container", children_only=True)
+        for idx, pid in enumerate(bench):
+            pdata = self.session.players_lookup.get(pid, {})
+            pname = pdata.get("name", f"Player #{pid}")
+            ovr = pdata.get("overall", 60)
+            pos_code = pdata.get("pos_code", -1)
+            pos_str = get_position_name(pos_code)
+            jersey = self.session.get_player_jersey_number(pid)
+            
+            is_selected = (self.selected_swap_slot is not None and 
+                           self.selected_swap_slot[0] == "bench" and 
+                           self.selected_swap_slot[1] == idx)
+                           
+            sub_label = "[ACTIVE]" if is_selected else "[SUB]"
+            
+            with dpg.group(horizontal=True, parent="bench_container"):
+                dpg.add_button(label=sub_label, user_data=(idx, pid), callback=self._on_click_bench_sub, width=65)
+                dpg.add_text(f"#{jersey:02d} [{pos_str}] {pname}", color=(235, 240, 248))
+                dpg.add_text(f"({ovr})", color=get_ovr_tier_color(ovr))
+
+        # 2. Populate Reserves
+        dpg.delete_item("reserves_container", children_only=True)
+        for idx, pid in enumerate(reserves):
+            pdata = self.session.players_lookup.get(pid, {})
+            pname = pdata.get("name", f"Player #{pid}")
+            ovr = pdata.get("overall", 60)
+            pos_code = pdata.get("pos_code", -1)
+            pos_str = get_position_name(pos_code)
+            jersey = self.session.get_player_jersey_number(pid)
+            
+            is_selected = (self.selected_swap_slot is not None and 
+                           self.selected_swap_slot[0] == "reserves" and 
+                           self.selected_swap_slot[1] == idx)
+                           
+            btn_label = "[ACTIVE]" if is_selected else "[PROMOTE]"
+            
+            with dpg.group(horizontal=True, parent="reserves_container"):
+                dpg.add_button(label=btn_label, user_data=(idx, pid), callback=self._on_click_reserve_sub, width=75)
+                dpg.add_text(f"#{jersey:02d} [{pos_str}] {pname}", color=(200, 210, 220))
+                dpg.add_text(f"({ovr})", color=get_ovr_tier_color(ovr))
+
+    def _populate_team_tactics(self, team_id: int):
+        """Loads and synchronizes tactical sliders and captaincy settings."""
+        tactics = self.session.get_team_tactics(team_id)
+        if dpg.does_item_exist("slider_depth"): dpg.set_value("slider_depth", tactics["defensive_depth"])
+        if dpg.does_item_exist("slider_def_width"): dpg.set_value("slider_def_width", tactics["defensive_width"])
+        if dpg.does_item_exist("slider_off_width"): dpg.set_value("slider_off_width", tactics["offensive_width"])
+        if dpg.does_item_exist("slider_tempo"): dpg.set_value("slider_tempo", tactics["buildup_tempo"])
+        if dpg.does_item_exist("slider_passing"): dpg.set_value("slider_passing", tactics["passing_directness"])
+        if dpg.does_item_exist("slider_pressure"): dpg.set_value("slider_pressure", tactics["pressure_intensity"])
+        
+        style_val = tactics["defensive_style"]
+        style_map = {1: "1: Drop Back", 2: "2: Balanced", 3: "3: Pressure on Heavy Touch", 4: "4: Press After Possession Loss", 5: "5: Constant Pressure"}
+        if dpg.does_item_exist("combo_def_style"):
+            dpg.set_value("combo_def_style", style_map.get(style_val, "2: Balanced"))
+            
+        # Populate Captain and Set-Piece Combos
+        roster = self.session.team_rosters.get(team_id, [])
+        cap_items = []
+        for pid in roster:
+            p = self.session.players_lookup.get(pid, {})
+            j = self.session.get_player_jersey_number(pid)
+            cap_items.append(f"#{j:02d} {p.get('name', 'Player')} (OVR {p.get('overall', 60)}) - ID {pid}")
+            
+        roles = self.session.get_team_squad_roles(team_id)
+        captain_pid = roles.get("captain", tactics.get("captain_id", 0))
+        
+        for tag in ["combo_captain", "combo_penalty", "combo_freekick_short", "combo_freekick_long", "combo_corner_left", "combo_corner_right"]:
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, items=cap_items)
+                
+        def find_item_for_pid(target_pid: int) -> str:
+            for item in cap_items:
+                if f"ID {target_pid}" in item:
+                    return item
+            return cap_items[0] if cap_items else ""
+            
+        if dpg.does_item_exist("combo_captain") and cap_items:
+            dpg.set_value("combo_captain", find_item_for_pid(captain_pid))
+        if dpg.does_item_exist("combo_penalty") and cap_items:
+            dpg.set_value("combo_penalty", find_item_for_pid(roles.get("penalty", captain_pid)))
+        if dpg.does_item_exist("combo_freekick_short") and cap_items:
+            dpg.set_value("combo_freekick_short", find_item_for_pid(roles.get("freekick_short", captain_pid)))
+        if dpg.does_item_exist("combo_freekick_long") and cap_items:
+            dpg.set_value("combo_freekick_long", find_item_for_pid(roles.get("freekick_long", captain_pid)))
+        if dpg.does_item_exist("combo_corner_left") and cap_items:
+            dpg.set_value("combo_corner_left", find_item_for_pid(roles.get("corner_left", captain_pid)))
+        if dpg.does_item_exist("combo_corner_right") and cap_items:
+            dpg.set_value("combo_corner_right", find_item_for_pid(roles.get("corner_right", captain_pid)))
+
+    def _on_pitch_clicked(self, sender, app_data):
+        """Handles mouse clicks on the visual pitch canvas for selection and swapping."""
+        if not self.selected_team or not self.pitch_slots_bounds:
+            return
+        mx, my = dpg.get_drawing_mouse_pos()
+        clicked_slot = None
+        for b in self.pitch_slots_bounds:
+            if b["bx"] <= mx <= b["bx"] + b["bw"] and b["by"] <= my <= b["by"] + b["bh"]:
+                clicked_slot = b
+                break
+                
+        if not clicked_slot:
+            return
+            
+        tid = self.selected_team["teamid"]
+        slot_idx = clicked_slot["slot_idx"]
+        pid = clicked_slot["pid"]
+        
+        if self.selected_swap_slot is None:
+            # First Selection
+            self.selected_swap_slot = ("starting_xi", slot_idx, pid)
+            pname = self.session.players_lookup.get(pid, {}).get("name", f"Player #{pid}")
+            ovr = self.session.players_lookup.get(pid, {}).get("overall", 60)
+            slot_name = clicked_slot["slot_name"]
+            dpg.set_value("lineup_status_banner", f"[SWAP ACTIVE] Selected [{slot_name}] {pname} ({ovr} OVR) - Click target player or substitute to swap")
+            dpg.configure_item("lineup_cancel_btn", show=True)
+            self._render_pitch_lineup(tid)
+            self._refresh_dugout_display(tid)
+        else:
+            # Second Selection -> Execute Swap
+            src_type, src_idx, src_pid = self.selected_swap_slot
+            if src_type == "starting_xi" and src_idx == slot_idx:
+                # Clicked same player -> cancel
+                self.selected_swap_slot = None
+                dpg.set_value("lineup_status_banner", "Selection canceled.")
+                dpg.configure_item("lineup_cancel_btn", show=False)
+                self._render_pitch_lineup(tid)
+                self._refresh_dugout_display(tid)
+            else:
+                ok, msg = self.session.swap_lineup_players(tid, src_type, src_idx, "starting_xi", slot_idx)
+                self.selected_swap_slot = None
+                dpg.configure_item("lineup_cancel_btn", show=False)
+                dpg.set_value("lineup_status_banner", msg if ok else f"Swap failed: {msg}")
+                self._render_pitch_lineup(tid)
+                self._refresh_dugout_display(tid)
+                self._update_save_and_changes_toolbar()
+
+    def _on_click_bench_sub(self, sender, app_data, user_data):
+        """Handles selecting or swapping a substitute on the bench."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        bench_idx, pid = user_data
+        
+        if self.selected_swap_slot is None:
+            self.selected_swap_slot = ("bench", bench_idx, pid)
+            pname = self.session.players_lookup.get(pid, {}).get("name", f"Player #{pid}")
+            ovr = self.session.players_lookup.get(pid, {}).get("overall", 60)
+            dpg.set_value("lineup_status_banner", f"[SWAP ACTIVE] Selected [BENCH #{bench_idx+1}] {pname} ({ovr} OVR) - Click starter on pitch to substitute")
+            dpg.configure_item("lineup_cancel_btn", show=True)
+            self._render_pitch_lineup(tid)
+            self._refresh_dugout_display(tid)
+        else:
+            src_type, src_idx, src_pid = self.selected_swap_slot
+            ok, msg = self.session.swap_lineup_players(tid, src_type, src_idx, "bench", bench_idx)
+            self.selected_swap_slot = None
+            dpg.configure_item("lineup_cancel_btn", show=False)
+            dpg.set_value("lineup_status_banner", msg if ok else f"Swap failed: {msg}")
+            self._render_pitch_lineup(tid)
+            self._refresh_dugout_display(tid)
+            self._update_save_and_changes_toolbar()
+
+    def _on_click_reserve_sub(self, sender, app_data, user_data):
+        """Handles selecting or swapping a player from the reserves."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        res_idx, pid = user_data
+        
+        if self.selected_swap_slot is None:
+            self.selected_swap_slot = ("reserves", res_idx, pid)
+            pname = self.session.players_lookup.get(pid, {}).get("name", f"Player #{pid}")
+            ovr = self.session.players_lookup.get(pid, {}).get("overall", 60)
+            dpg.set_value("lineup_status_banner", f"[SWAP ACTIVE] Selected [RESERVE #{res_idx+1}] {pname} ({ovr} OVR) - Click starter or bench to promote")
+            dpg.configure_item("lineup_cancel_btn", show=True)
+            self._render_pitch_lineup(tid)
+            self._refresh_dugout_display(tid)
+        else:
+            src_type, src_idx, src_pid = self.selected_swap_slot
+            ok, msg = self.session.swap_lineup_players(tid, src_type, src_idx, "reserves", res_idx)
+            self.selected_swap_slot = None
+            dpg.configure_item("lineup_cancel_btn", show=False)
+            dpg.set_value("lineup_status_banner", msg if ok else f"Swap failed: {msg}")
+            self._render_pitch_lineup(tid)
+            self._refresh_dugout_display(tid)
+            self._update_save_and_changes_toolbar()
+
+    def _on_cancel_lineup_swap(self, sender, app_data):
+        """Cancels an active player selection or swap."""
+        self.selected_swap_slot = None
+        dpg.configure_item("lineup_cancel_btn", show=False)
+        dpg.set_value("lineup_status_banner", "Selection canceled.")
+        if self.selected_team:
+            tid = self.selected_team["teamid"]
+            self._render_pitch_lineup(tid)
+            self._refresh_dugout_display(tid)
+
+    def _on_change_team_formation(self, sender, app_data):
+        """Updates team tactical formation and rearranges the pitch layout."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        new_f = app_data
+        ok, msg = self.session.set_team_formation(tid, new_f)
+        if ok:
+            dpg.set_value("lineup_status_banner", f"Formation changed to {new_f}")
+            self._render_pitch_lineup(tid)
+            self._update_save_and_changes_toolbar()
+
+    def _on_reset_team_lineup(self, sender, app_data):
+        """Resets the club lineup to the default authentic autofit."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        if tid in self.session.team_lineups:
+            del self.session.team_lineups[tid]
+        self.selected_swap_slot = None
+        dpg.configure_item("lineup_cancel_btn", show=False)
+        dpg.set_value("lineup_status_banner", "Lineup reset to authentic default.")
+        self._render_pitch_lineup(tid)
+        self._refresh_dugout_display(tid)
+        self._update_save_and_changes_toolbar()
+
+    def _on_change_tactical_slider(self, sender, app_data, user_data):
+        """Callback for tactical sliders, persisting to mDGw."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        key = user_data
+        val = float(app_data)
+        ok, msg = self.session.set_team_tactics(tid, **{key: val})
+        if dpg.does_item_exist("tactics_save_status"):
+            dpg.set_value("tactics_save_status", f"Updated {key.replace('_', ' ').title()}: {val:.2f} (staged in ChangeTracker)")
+        self._update_save_and_changes_toolbar()
+
+    def _on_change_def_style(self, sender, app_data):
+        """Callback for defensive pressing style combo."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        code = int(app_data.split(":")[0])
+        self.session.set_team_tactics(tid, defensive_style=code)
+        if dpg.does_item_exist("tactics_save_status"):
+            dpg.set_value("tactics_save_status", f"Defensive style updated: {app_data}")
+        self._update_save_and_changes_toolbar()
+
+    def _on_change_team_captain(self, sender, app_data):
+        """Callback for team captain selection, persisting to lyxL.WLKn."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        if "ID " in app_data:
+            try:
+                pid = int(app_data.split("ID ")[-1].strip(")"))
+                self.session.set_team_captain(tid, pid)
+                roles = self.session.get_team_squad_roles(tid)
+                roles["captain"] = pid
+                self._render_pitch_lineup(tid)
+                self._update_save_and_changes_toolbar()
+                if dpg.does_item_exist("tactics_save_status"):
+                    dpg.set_value("tactics_save_status", f"Captain updated: {app_data}")
+            except Exception:
+                pass
+
+    def _on_change_setpiece_taker(self, sender, app_data, user_data):
+        """Callback for set-piece specialists."""
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        role_key = user_data
+        if "ID " in app_data:
+            try:
+                pid = int(app_data.split("ID ")[-1].strip(")"))
+                roles = self.session.get_team_squad_roles(tid)
+                roles[role_key] = pid
+                self.session.set_team_squad_roles(tid, roles)
+                self._update_save_and_changes_toolbar()
+                if dpg.does_item_exist("tactics_save_status"):
+                    dpg.set_value("tactics_save_status", f"{role_key.replace('_', ' ').title()} updated: {app_data}")
+            except Exception:
+                pass
 
     # --- Database Editor UI Callbacks ---
 
