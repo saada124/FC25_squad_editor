@@ -4,14 +4,14 @@ import sys
 from typing import Dict, List, Tuple, Any, Optional
 
 try:
-    from core.backup import create_load_backup, list_folder_backups
+    from core.backup import create_load_backup, list_folder_backups, purge_old_backups, get_folder_backups_summary
     from core.fbchunks import FBChunksContainer
     from core.db_codec import FIFADatabase, DBTable, DBColumn, get_bits, set_bits
     from core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
     from core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
     from core.change_tracker import ChangeTracker, ChangeEntry
 except ImportError:
-    from src.core.backup import create_load_backup, list_folder_backups
+    from src.core.backup import create_load_backup, list_folder_backups, purge_old_backups, get_folder_backups_summary
     from src.core.fbchunks import FBChunksContainer
     from src.core.db_codec import FIFADatabase, DBTable, DBColumn, get_bits, set_bits
     from src.core.schema import get_table_display_name, get_column_display_name, get_column_clean_name, get_position_name, get_team_name, get_nation_name, classify_column, TEAM_NAMES, POSITION_NAMES, NATION_NAMES
@@ -256,14 +256,19 @@ class SquadsSession:
         ordered_nations.extend(sorted(nations_set - set(ordered_nations)))
         self.all_nations = ordered_nations
 
-    def load_squads_file(self, filepath: str) -> Tuple[bool, str]:
+    def load_squads_file(self, filepath: str, create_backup: bool = True, max_backups_retain: int = 10) -> Tuple[bool, str]:
         """
         Loads a squads file.
-        IMPORTANT: Immediately creates a duplicate safety copy in the same directory.
+        IMPORTANT: Immediately creates a duplicate safety copy in the same directory (with auto-pruning).
         """
         try:
-            # 1. Immediate Safety Duplicate in same directory
-            self.backup_path, backup_msg = create_load_backup(filepath)
+            # 1. Immediate Safety Duplicate in same directory with auto-pruning
+            if create_backup:
+                self.backup_path, backup_msg = create_load_backup(filepath, auto_prune=True, max_retain=max_backups_retain)
+            else:
+                self.backup_path = None
+                if max_backups_retain is not None and max_backups_retain < 999:
+                    purge_old_backups(filepath, keep_last=max_backups_retain)
             
             # 2. Parse Frostbite Container & inner DB
             db_payload = self.container.load(filepath)

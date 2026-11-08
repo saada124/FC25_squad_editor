@@ -17,7 +17,7 @@ try:
     )
     from core.backup import (
         list_folder_backups, create_load_backup, restore_backup,
-        delete_backup, purge_old_backups, get_backup_metadata
+        delete_backup, purge_old_backups, get_backup_metadata, get_folder_backups_summary
     )
     from core.settings import AppSettings
     from core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
@@ -32,7 +32,7 @@ except ImportError:
     )
     from src.core.backup import (
         list_folder_backups, create_load_backup, restore_backup,
-        delete_backup, purge_old_backups, get_backup_metadata
+        delete_backup, purge_old_backups, get_backup_metadata, get_folder_backups_summary
     )
     from src.core.settings import AppSettings
     from src.core.playstyles import PLAYSTYLE_CATEGORIES, PLAYSTYLE_MAP, decode_player_playstyles, encode_player_playstyles, get_active_playstyles_summary
@@ -890,7 +890,7 @@ class SquadEditorApp:
                     dpg.add_separator()
                     dpg.add_spacer(height=6)
                     
-                    dpg.add_text("Available Squad Backups:", color=(200, 200, 200))
+                    dpg.add_text("Available Squad Backups:", tag="settings_backups_header", color=(200, 200, 200))
                     dpg.add_listbox(items=[], num_items=12, tag="settings_backups_listbox", width=550)
                     
                     dpg.add_spacer(height=10)
@@ -1014,11 +1014,15 @@ class SquadEditorApp:
         if not path:
             return
 
-        success, msg = self.session.load_squads_file(path)
+        success, msg = self.session.load_squads_file(
+            path,
+            create_backup=self.config.auto_backup_on_load,
+            max_backups_retain=self.config.max_backups_retain
+        )
         if success:
             dpg.set_value("status_text", f"Loaded: {os.path.basename(path)}")
             dpg.set_value("settings_active_file", path)
-            dpg.set_value("settings_backup_file", self.session.backup_path or "Created")
+            dpg.set_value("settings_backup_file", self.session.backup_path or "Disabled in settings")
             self._update_backups_list()
             self._load_players_list()
             self._load_teams_list()
@@ -1037,9 +1041,7 @@ class SquadEditorApp:
             return
         if self.config.auto_backup_on_save and self.session.filepath:
             try:
-                create_load_backup(self.session.filepath)
-                if self.config.max_backups_retain < 999:
-                    purge_old_backups(self.session.filepath, keep_last=self.config.max_backups_retain)
+                create_load_backup(self.session.filepath, auto_prune=True, max_retain=self.config.max_backups_retain)
                 self._update_backups_list()
             except Exception:
                 pass
@@ -1069,7 +1071,7 @@ class SquadEditorApp:
             dpg.set_value("settings_backup_feedback", "[!] Load a squads file first to create a backup.")
             return
         try:
-            bp, msg = create_load_backup(self.session.filepath)
+            bp, msg = create_load_backup(self.session.filepath, auto_prune=True, max_retain=self.config.max_backups_retain)
             self._update_backups_list()
             dpg.set_value("settings_backup_feedback", f"[OK] Created backup: {os.path.basename(bp)}")
         except Exception as e:
@@ -1103,7 +1105,11 @@ class SquadEditorApp:
         target_path = self.session.filepath
         ok, msg = restore_backup(self.pending_restore_backup_path, target_path)
         if ok:
-            success, load_msg = self.session.load_squads_file(target_path)
+            success, load_msg = self.session.load_squads_file(
+                target_path,
+                create_backup=False,
+                max_backups_retain=self.config.max_backups_retain
+            )
             if success:
                 self._load_players_list()
                 self._load_teams_list()
@@ -1175,7 +1181,16 @@ class SquadEditorApp:
         else:
             self.config.max_backups_retain = 999
         self.config.save()
-        dpg.set_value("diag_feedback_text", f"Retention limit set to {val_str} (saved)")
+
+        prune_note = ""
+        if self.session.filepath and self.config.max_backups_retain < 999:
+            purged, _ = purge_old_backups(self.session.filepath, keep_last=self.config.max_backups_retain)
+            if purged > 0:
+                self._update_backups_list()
+                prune_note = f" (auto-pruned {purged} older backup{'s' if purged > 1 else ''})"
+
+        dpg.set_value("diag_feedback_text", f"Retention limit set to {val_str}{prune_note} (saved)")
+        dpg.set_value("settings_backup_feedback", f"Retention limit updated to {val_str}{prune_note}.")
 
     def _on_run_integrity_scan(self):
         if not self.session.is_loaded:
@@ -1417,7 +1432,8 @@ class SquadEditorApp:
 
     def _update_backups_list(self):
         if self.session.filepath:
-            backups = list_folder_backups(self.session.filepath)
+            summary = get_folder_backups_summary(self.session.filepath)
+            backups = summary["backups"]
             self.cached_backup_paths = backups
             items = []
             for bp in backups:
@@ -1425,6 +1441,9 @@ class SquadEditorApp:
                 items.append(f"{meta.get('filename', os.path.basename(bp))}  [{meta.get('size_str', '')}]  -  {meta.get('mtime', '')}")
             if dpg.does_item_exist("settings_backups_listbox"):
                 dpg.configure_item("settings_backups_listbox", items=items)
+            retain_str = f"Retention: {self.config.max_backups_retain}" if self.config.max_backups_retain < 999 else "Retention: Unlimited"
+            if dpg.does_item_exist("settings_backups_header"):
+                dpg.set_value("settings_backups_header", f"Available Squad Backups: {summary['count']} ({summary['total_size_str']} total | {retain_str}):")
 
     def _populate_club_combo(self):
         club_items = ["Free Agent"]

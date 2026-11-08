@@ -3,10 +3,11 @@ import shutil
 from datetime import datetime
 from typing import Tuple, List
 
-def create_load_backup(filepath: str) -> Tuple[str, str]:
+def create_load_backup(filepath: str, auto_prune: bool = True, max_retain: int = 10) -> Tuple[str, str]:
     """
     Creates an immediate safety duplicate of the squads file in the same directory.
     Format: <OriginalName>.backup_<YYYYMMDD_HHMMSS>
+    Automatically prunes older backups to enforce the max_retain storage limit.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Squads file not found: {filepath}")
@@ -18,7 +19,14 @@ def create_load_backup(filepath: str) -> Tuple[str, str]:
     backup_path = os.path.join(file_dir, backup_name)
     
     shutil.copy2(filepath, backup_path)
-    msg = f"Created safety backup: {backup_name}"
+
+    prune_note = ""
+    if auto_prune and max_retain is not None and max_retain < 999:
+        purged, _ = purge_old_backups(filepath, keep_last=max_retain)
+        if purged > 0:
+            prune_note = f" (auto-pruned {purged} older backup{'s' if purged > 1 else ''})"
+
+    msg = f"Created safety backup: {backup_name}{prune_note}"
     return backup_path, msg
 
 def list_folder_backups(filepath: str) -> List[str]:
@@ -87,4 +95,21 @@ def get_backup_metadata(backup_path: str) -> dict:
         "size_bytes": size_bytes,
         "size_str": f"{size_bytes / 1_048_576:.2f} MB" if size_bytes >= 1_048_576 else f"{size_bytes / 1024:.1f} KB",
         "mtime": mtime
+    }
+
+def get_folder_backups_summary(filepath: str) -> dict:
+    """Returns aggregate storage metrics (count, total size, size_str) for all backups of filepath."""
+    backups = list_folder_backups(filepath)
+    total_bytes = 0
+    for bp in backups:
+        try:
+            total_bytes += os.path.getsize(bp)
+        except OSError:
+            pass
+    size_str = f"{total_bytes / 1_048_576:.2f} MB" if total_bytes >= 1_048_576 else f"{total_bytes / 1024:.1f} KB"
+    return {
+        "count": len(backups),
+        "total_bytes": total_bytes,
+        "total_size_str": size_str,
+        "backups": backups
     }
