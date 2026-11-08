@@ -26,6 +26,7 @@ try:
         FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION,
         get_formation_slots, get_slot_category_color, get_ovr_tier_color
     )
+    from core.team_mappings import get_parent_club_id, is_women_team
 except ImportError:
     from src.model.squads_db import SquadsSession
     from src.core.schema import (
@@ -45,6 +46,7 @@ except ImportError:
         FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION,
         get_formation_slots, get_slot_category_color, get_ovr_tier_color
     )
+    from src.core.team_mappings import get_parent_club_id, is_women_team
 
 class SquadEditorApp:
     def __init__(self):
@@ -133,9 +135,10 @@ class SquadEditorApp:
                 if self.selected_team:
                     cur_tid = self.selected_team.get("teamid", 0)
                     cur_parent = get_parent_club_id(cur_tid)
-                    if cur_tid == id_val or cur_parent == id_val:
+                    if cur_tid == id_val or (cur_parent > 0 and cur_parent == id_val):
                         if dpg.does_item_exist("team_crest_img"):
                             dpg.configure_item("team_crest_img", texture_tag=tag)
+                self.assets.cleanup_old_club_texture(id_val)
         except Exception:
             pass
 
@@ -744,8 +747,20 @@ class SquadEditorApp:
                 dpg.add_text("Search Clubs & Teams", color=(0, 180, 240))
                 dpg.add_input_text(hint="Search club name or ID...", callback=self._on_filter_teams, tag="team_search_input", width=390)
                 dpg.add_separator()
-                dpg.add_text("Total Clubs: 0", tag="team_count_label", color=(150, 150, 150))
-                dpg.add_listbox(items=[], num_items=28, tag="teams_listbox", callback=self._on_select_team, width=390)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Total Clubs: 0", tag="team_count_label", color=(150, 150, 150))
+                    dpg.add_spacer(width=6)
+                    dpg.add_button(label="[Download All Logos]", callback=self._on_start_batch_crests_download, tag="btn_batch_crests")
+
+                with dpg.group(tag="batch_crests_progress_group", show=False):
+                    dpg.add_progress_bar(tag="batch_crests_progress_bar", default_value=0.0, width=390)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Downloading: 0/0", tag="batch_crests_status_txt", color=(0, 200, 255))
+                        dpg.add_spacer(width=10)
+                        dpg.add_button(label="[Cancel]", callback=self._on_cancel_batch_crests_download, tag="btn_cancel_batch_crests")
+                    dpg.add_separator()
+
+                dpg.add_listbox(items=[], num_items=26, tag="teams_listbox", callback=self._on_select_team, width=390)
 
             # Right Column: Team Inspector & Roster
             with dpg.child_window():
@@ -2836,12 +2851,63 @@ class SquadEditorApp:
             return
         ok, msg = self.assets.import_custom_club_crest(tid, filepath)
         if ok:
-            tex_tag = f"tex_club_{tid}"
+            tex_tag = self.assets.get_club_texture(tid, self.selected_team["name"])
             if dpg.does_item_exist("team_crest_img"):
                 dpg.configure_item("team_crest_img", texture_tag=tex_tag)
             dpg.set_value("team_save_feedback", f"[OK] {msg}")
         else:
             dpg.set_value("team_save_feedback", f"[Error] {msg}")
+
+    def _on_start_batch_crests_download(self):
+        """Starts background batch download of all missing club logos."""
+        if not self.session.teams_cache:
+            dpg.set_value("team_save_feedback", "[!] Please load a squads file first.")
+            return
+        if getattr(self.assets, "batch_download_running", False):
+            return
+
+        dpg.configure_item("batch_crests_progress_group", show=True)
+        dpg.configure_item("btn_batch_crests", show=False)
+        dpg.set_value("batch_crests_progress_bar", 0.0)
+        dpg.set_value("batch_crests_status_txt", "Starting download...")
+
+        def on_prog(prog):
+            total = max(1, prog.get("total", 1))
+            done = prog.get("completed", 0)
+            cur = prog.get("current_team", "")
+            dl = prog.get("downloaded", 0)
+            pct = done / total
+            if dpg.does_item_exist("batch_crests_progress_bar"):
+                dpg.set_value("batch_crests_progress_bar", pct)
+            if dpg.does_item_exist("batch_crests_status_txt"):
+                dpg.set_value("batch_crests_status_txt", f"[{done}/{total}] {dl} new ({int(pct*100)}%) - {cur[:16]}")
+
+        def on_comp(prog):
+            if dpg.does_item_exist("batch_crests_progress_bar"):
+                dpg.set_value("batch_crests_progress_bar", 1.0)
+            if dpg.does_item_exist("batch_crests_status_txt"):
+                dl = prog.get("downloaded", 0)
+                dpg.set_value("batch_crests_status_txt", f"Completed: {dl} logos downloaded!")
+            if dpg.does_item_exist("btn_batch_crests"):
+                dpg.configure_item("btn_batch_crests", show=True)
+            if self.selected_team and dpg.does_item_exist("team_crest_img"):
+                tid = self.selected_team["teamid"]
+                tex = self.assets.get_club_texture(tid, self.selected_team["name"])
+                dpg.configure_item("team_crest_img", texture_tag=tex)
+
+        self.assets.start_batch_crest_download(
+            self.session.teams_cache,
+            on_progress=on_prog,
+            on_complete=on_comp
+        )
+
+    def _on_cancel_batch_crests_download(self):
+        """Cancels active batch crest download."""
+        self.assets.cancel_batch_crest_download()
+        if dpg.does_item_exist("batch_crests_status_txt"):
+            dpg.set_value("batch_crests_status_txt", "Cancelled by user.")
+        if dpg.does_item_exist("btn_batch_crests"):
+            dpg.configure_item("btn_batch_crests", show=True)
 
     def _on_import_manager_face(self):
         """Allows user to select and import a custom manager photo."""
