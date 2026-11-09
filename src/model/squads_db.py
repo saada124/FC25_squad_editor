@@ -1,6 +1,7 @@
 import os
 import csv
 import sys
+import unicodedata
 from typing import Dict, List, Tuple, Any, Optional
 
 try:
@@ -19,6 +20,12 @@ except ImportError:
     from src.core.team_mappings import format_team_display_name, SECONDARY_TO_PRIMARY_TEAMS, is_women_team, get_parent_club_id
     from src.core.change_tracker import ChangeTracker, ChangeEntry
     from src.core.formations import FORMATIONS, FORMATION_NAMES, DEFAULT_FORMATION, get_formation_slots, get_slot_category_color, get_ovr_tier_color
+
+def strip_accents(s: str) -> str:
+    """Removes diacritics and accents for robust case-insensitive searching."""
+    if not s:
+        return ""
+    return ''.join(c for c in unicodedata.normalize('NFKD', str(s)) if not unicodedata.combining(c)).lower()
 
 def get_base_dir() -> str:
     """Returns application directory whether running as script or frozen PyInstaller exe."""
@@ -503,7 +510,11 @@ class SquadsSession:
                 "czum_row_idx": czum_row,
                 "risb_row_idx": risb_row,
                 "row_index": len(self.players_cache),
-                "table_sname": "CZUM"
+                "table_sname": "CZUM",
+                "norm_name": strip_accents(pdata["name"]),
+                "norm_club": strip_accents(club_name),
+                "norm_nation": strip_accents(nation_str),
+                "pid_str": str(pid)
             }
             self.players_cache.append(entry)
 
@@ -567,7 +578,10 @@ class SquadsSession:
                             "roster_count": len(roster),
                             "roster": roster,
                             "table_sname": "lyxL",
-                            "row_index": r_idx
+                            "row_index": r_idx,
+                            "norm_name": strip_accents(formatted_name),
+                            "norm_league": strip_accents(self.team_to_league.get(tid, "")),
+                            "tid_str": str(tid)
                         })
                         indexed_teams.add(tid)
                 except Exception:
@@ -2220,3 +2234,48 @@ class SquadsSession:
                 urg = "Urgent / Action Required" if ("FyBC" in tbl.columns_map and tbl.columns_map.get("FyBC").decode_value(rec)) else "Standard Notification"
                 return f"Career Mode Inbox: Message Type #{ntype} ({urg})"
         return None
+
+    def search_entities(self, query: str, max_players: int = 15, max_teams: int = 6) -> Dict[str, Any]:
+        """
+        Instant universal search across players and clubs with diacritics tolerance.
+        Returns top matching players and clubs formatted with metadata for rapid UI navigation.
+        """
+        q = strip_accents(query.strip()) if query else ""
+        if not q:
+            # Default fallback when query is blank: top superstars and premier clubs
+            return {
+                "players": self.players_cache[:max_players],
+                "teams": self.teams_cache[:max_teams]
+            }
+
+        matched_teams = []
+        matched_players = []
+
+        # 1. Search teams (all 816 clubs)
+        for t in self.teams_cache:
+            tname = t.get("norm_name") or strip_accents(t.get("name", ""))
+            tid_str = t.get("tid_str") or str(t.get("teamid", ""))
+            league = t.get("norm_league") or strip_accents(t.get("league", ""))
+
+            if q in tname or q == tid_str or (len(q) > 3 and q in league):
+                matched_teams.append(t)
+                if len(matched_teams) >= max_teams * 2:
+                    break
+
+        # 2. Search players (all 25,000+ players)
+        for p in self.players_cache:
+            pname = p.get("norm_name") or strip_accents(p.get("name", ""))
+            pid_str = p.get("pid_str") or str(p.get("playerid", ""))
+            club = p.get("norm_club") or strip_accents(p.get("club", ""))
+            nation = p.get("norm_nation") or strip_accents(p.get("nation_name", ""))
+            pos = p.get("position", "").lower()
+
+            if q in pname or q == pid_str or (len(q) > 2 and (q in club or q in nation or q == pos)):
+                matched_players.append(p)
+                if len(matched_players) >= max_players * 2:
+                    break
+
+        return {
+            "players": matched_players[:max_players],
+            "teams": matched_teams[:max_teams]
+        }

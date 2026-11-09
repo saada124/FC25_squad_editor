@@ -27,6 +27,7 @@ try:
         get_formation_slots, get_slot_category_color, get_ovr_tier_color
     )
     from core.team_mappings import get_parent_club_id, is_women_team
+    from core.auditor import audit_team_squad, audit_entire_database, resolve_duplicate_jersey_numbers, assign_emergency_goalkeeper
 except ImportError:
     from src.model.squads_db import SquadsSession
     from src.core.schema import (
@@ -47,6 +48,7 @@ except ImportError:
         get_formation_slots, get_slot_category_color, get_ovr_tier_color
     )
     from src.core.team_mappings import get_parent_club_id, is_women_team
+    from src.core.auditor import audit_team_squad, audit_entire_database, resolve_duplicate_jersey_numbers, assign_emergency_goalkeeper
 
 class SquadEditorApp:
     def __init__(self):
@@ -68,11 +70,14 @@ class SquadEditorApp:
         self.selected_team_roster_pid: Optional[int] = None
         self.filtered_sign_players: List[Dict[str, Any]] = []
         self.selected_sign_player: Optional[Dict[str, Any]] = None
-        
+        self.quick_search_items_data: List[Dict[str, Any]] = []
+        self.active_team_audit: Optional[Dict[str, Any]] = None
+        self.global_audit_results: List[Dict[str, Any]] = []
+
         # Visual Lineup & Formation Manager State
         self.selected_swap_slot: Optional[tuple] = None  # (slot_type, index, pid)
         self.pitch_slots_bounds: List[Dict[str, Any]] = []
-        
+
         # Filtered lists & Presets (Clean ASCII/Unicode labels)
         self.filtered_players: List[Dict[str, Any]] = []
         self.filtered_teams: List[Dict[str, Any]] = []
@@ -83,6 +88,11 @@ class SquadEditorApp:
             "Free Agents",
             "Top Superstars (85+)",
             "Wonderkids (POT 85+, Age <= 21)",
+            "High Growth Prospects (+10 POT)",
+            "Hidden Gems (OVR <= 74, POT >= 82)",
+            "Elite Free Agents (POT >= 80, No Club)",
+            "Future Goalkeepers (GK, Age <= 23, POT >= 82)",
+            "Expiring Contracts (Contract <= 1 yr)",
             "Messi Regen (ARG)",
             "CR7 Regen (POR)",
             "Benzema Regen (FRA)",
@@ -222,6 +232,12 @@ class SquadEditorApp:
 
     def _build_ui(self):
         self.assets.init_dpg_textures()
+
+        # Global Hotkey Registry for Quick Search (Ctrl+F / Ctrl+K)
+        with dpg.handler_registry():
+            dpg.add_key_press_handler(dpg.mvKey_F, callback=self._on_hotkey_search)
+            dpg.add_key_press_handler(dpg.mvKey_K, callback=self._on_hotkey_search)
+
         with dpg.window(tag="primary_window", no_title_bar=True, no_move=True, no_resize=True):
             # Top Control & Status Header
             with dpg.group(horizontal=True):
@@ -233,25 +249,29 @@ class SquadEditorApp:
                 dpg.add_button(label="Save As...", callback=self._on_click_save_as)
                 dpg.add_spacer(width=20)
                 dpg.add_text("Ready. Please open a Squads save file.", tag="status_text", color=(180, 180, 180))
+                dpg.add_spacer(width=50)
+                # Persistent Top-Right Global Search Bar with gray placeholder
+                dpg.add_input_text(hint="Ctrl+F to search", tag="top_global_search_input", width=210, callback=self._on_top_search_input, on_enter=True)
+                dpg.add_button(label="[Search]", callback=self._on_open_quick_search_from_button, width=75)
 
             dpg.add_separator()
 
             # Main Navigation Tabs
             with dpg.tab_bar(tag="main_tab_bar"):
                 # TAB 1: PLAYERS
-                with dpg.tab(label=" Players "):
+                with dpg.tab(label=" Players ", tag="tab_players"):
                     self._build_players_tab()
 
                 # TAB 2: TEAMS
-                with dpg.tab(label=" Teams & Clubs "):
+                with dpg.tab(label=" Teams & Clubs ", tag="tab_teams"):
                     self._build_teams_tab()
 
                 # TAB 3: FULL DATABASE EDITOR (ALL 76 TABLES)
-                with dpg.tab(label=" Database Tables (All 76) "):
+                with dpg.tab(label=" Database Tables (All 76) ", tag="tab_database"):
                     self._build_database_tab()
 
                 # TAB 4: SAFETY BACKUPS & INFO
-                with dpg.tab(label=" Settings & Backups "):
+                with dpg.tab(label=" Settings & Backups ", tag="tab_settings"):
                     self._build_settings_tab()
 
             # Structural Modification Confirmation Modal
@@ -338,6 +358,65 @@ class SquadEditorApp:
                     dpg.add_spacer(width=20)
                     dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item("discard_all_confirm_modal", show=False), width=100)
 
+            # Global Quick Search & Navigation Modal (Ctrl+F / Ctrl+K)
+            with dpg.window(label="Global Quick Search & Jump (Ctrl+F / Ctrl+K)", modal=True, show=False, tag="quick_search_modal", width=760, height=520, no_resize=False):
+                dpg.add_text("Universal Entity Finder (Players, Clubs, Leagues, IDs)", color=(0, 200, 255))
+                dpg.add_text("Search instantly across 25,000+ players and 816 clubs. Select any item and press Enter or click [Jump / Inspect].", color=(160, 160, 160))
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_input_text(hint="Type player name, ID, club, nation, or league...", tag="quick_search_input", callback=self._on_quick_search_query_changed, on_enter=True, width=580)
+                    dpg.add_button(label="Clear", callback=self._on_clear_quick_search, width=60)
+                    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("quick_search_modal", show=False), width=70)
+
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Scope:")
+                    dpg.add_radio_button(items=["All Results", "Players Only", "Clubs Only"], default_value="All Results", horizontal=True, tag="quick_search_filter_type", callback=self._on_quick_search_query_changed)
+
+                dpg.add_spacer(height=4)
+                dpg.add_text("Matches: 0", tag="quick_search_count_label", color=(180, 180, 180))
+                dpg.add_listbox(items=[], num_items=13, tag="quick_search_results_listbox", callback=self._on_quick_search_select, width=730)
+
+                dpg.add_spacer(height=6)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Jump / Inspect Selected Entity (Enter)", callback=self._on_quick_search_confirm, width=320)
+                    dpg.add_spacer(width=20)
+                    dpg.add_text("Tip: Arrow Up/Down to navigate, Enter to jump, Esc to close", color=(130, 130, 130))
+
+            # Squad Health & Rule Auditor Modal for Active Club
+            with dpg.window(label="Squad Health & Rule Audit Details", modal=True, show=False, tag="team_health_modal", width=680, height=450, no_resize=False):
+                dpg.add_text("Club Squad Health & Engine Rule Validation", color=(0, 200, 255))
+                dpg.add_text("", tag="audit_modal_team_header", color=(255, 200, 0))
+                dpg.add_separator()
+                dpg.add_spacer(height=4)
+                dpg.add_text("", tag="audit_modal_summary_text", color=(220, 220, 220))
+                dpg.add_spacer(height=6)
+                with dpg.child_window(height=220, tag="audit_modal_issues_container"):
+                    pass
+                dpg.add_spacer(height=6)
+                dpg.add_separator()
+                dpg.add_spacer(height=6)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="[Auto-Fix Duplicate Numbers]", callback=self._on_audit_autofix_jerseys, tag="btn_audit_fix_jerseys", width=230)
+                    dpg.add_spacer(width=10)
+                    dpg.add_button(label="[Sign Emergency Free Agent GK]", callback=self._on_audit_sign_emergency_gk, tag="btn_audit_sign_gk", width=230)
+                    dpg.add_spacer(width=20)
+                    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("team_health_modal", show=False), width=100)
+
+            # Full Database Squad Health Audit Modal
+            with dpg.window(label="Full Database Squad Health Audit (All 816 Clubs)", modal=True, show=False, tag="global_audit_modal", width=900, height=600, no_resize=False):
+                dpg.add_text("Full Database Squad Health Audit Report", color=(0, 200, 255))
+                dpg.add_text("", tag="global_audit_summary_label", color=(255, 200, 0))
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Export Audit Report (CSV)", callback=self._on_export_global_audit_csv, width=200)
+                    dpg.add_spacer(width=15)
+                    dpg.add_button(label="Re-scan Database", callback=self._on_run_full_database_audit, width=150)
+                    dpg.add_spacer(width=360)
+                    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("global_audit_modal", show=False), width=100)
+                dpg.add_spacer(height=6)
+                with dpg.child_window(height=450, tag="global_audit_results_container"):
+                    pass
+
         dpg.set_primary_window("primary_window", True)
 
     def _build_players_tab(self):
@@ -405,6 +484,7 @@ class SquadEditorApp:
                     with dpg.group():
                         with dpg.group(horizontal=True):
                             dpg.add_text("[ -- ]", tag="player_badge_ovr", color=(0, 255, 120))
+                            dpg.add_text("[Growth: --]", tag="player_badge_growth", color=(0, 220, 160))
                             dpg.add_text("Select a player from the list to view and edit details.", tag="player_header_name", color=(240, 240, 240))
                         dpg.add_text("No player selected", tag="player_sub_header", color=(160, 160, 160))
                 dpg.add_separator()
@@ -425,6 +505,8 @@ class SquadEditorApp:
                                 dpg.add_text("Club Transfer:    ")
                                 dpg.add_combo(items=[], tag="edit_player_club_combo", width=240)
                                 dpg.add_button(label="Transfer Club", callback=self._on_transfer_player, width=130)
+                                dpg.add_spacer(width=10)
+                                dpg.add_button(label="[+] Sign to Active Club", tag="btn_quick_sign_active_club", callback=self._on_quick_sign_to_active_club, width=190)
 
                             dpg.add_spacer(height=5)
                             with dpg.group(horizontal=True):
@@ -773,6 +855,10 @@ class SquadEditorApp:
                     with dpg.group():
                         dpg.add_text("Club Inspector", color=(0, 180, 240))
                         dpg.add_text("Select a team to view information and squad roster.", tag="team_selected_header", color=(200, 200, 200))
+                        with dpg.group(horizontal=True, tag="team_health_summary_group", show=False):
+                            dpg.add_text("[Squad Health: Healthy]", tag="team_health_badge", color=(0, 255, 120))
+                            dpg.add_spacer(width=10)
+                            dpg.add_button(label="[Audit & Auto-Fix Issues]", callback=self._on_open_team_health_modal, width=190)
                 dpg.add_separator()
 
                 with dpg.group(tag="team_edit_controls", show=False):
@@ -1107,6 +1193,11 @@ class SquadEditorApp:
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="Run Integrity Scan", callback=self._on_run_integrity_scan, width=170)
                         dpg.add_button(label="Export Diagnostics Report", callback=self._on_export_diagnostics_report, width=190)
+
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="[Audit All 816 Squads]", callback=self._on_run_full_database_audit, width=170)
+                        dpg.add_button(label="Export Audit CSV", callback=self._on_export_global_audit_csv, width=190)
 
                     dpg.add_spacer(height=8)
                     dpg.add_text("", tag="diag_feedback_text", color=(0, 255, 120), wrap=580)
@@ -1693,6 +1784,27 @@ class SquadEditorApp:
             elif "Wonderkids" in preset:
                 if p["potential"] < 85 or p.get("age", 25) > 21:
                     continue
+            elif "High Growth Prospects" in preset:
+                if (p["potential"] - p["overall"]) < 10:
+                    continue
+            elif "Hidden Gems" in preset:
+                if p["overall"] > 74 or p["potential"] < 82:
+                    continue
+            elif "Elite Free Agents" in preset:
+                if p["teamid"] not in (0, 111592) or p["potential"] < 80:
+                    continue
+            elif "Future Goalkeepers" in preset:
+                pos = p.get("position", "")
+                pos_code = p.get("pos_code", -1)
+                if (pos != "GK" and pos_code != 0) or p.get("age", 25) > 23 or p["potential"] < 82:
+                    continue
+            elif "Expiring Contracts" in preset:
+                try:
+                    exp_yr = int(p.get("stats", {}).get("contractvaliduntil", 2028) or 2028)
+                    if exp_yr > 2025:
+                        continue
+                except Exception:
+                    continue
             elif "Messi Regen" in preset:
                 if not (p["pos_code"] == 23 and p.get("nationality") == 52 and p["potential"] >= 89):
                     continue
@@ -2096,9 +2208,30 @@ class SquadEditorApp:
 
             # Set color-coded badge
             ovr = p["overall"]
+            pot = p.get("potential", ovr)
+            growth = pot - ovr
             badge_color = (0, 255, 120) if ovr >= 80 else (120, 255, 80) if ovr >= 70 else (255, 220, 0) if ovr >= 60 else (255, 140, 0) if ovr >= 50 else (255, 50, 50)
             dpg.set_value("player_badge_ovr", f"[ {ovr:2d} ]")
             dpg.configure_item("player_badge_ovr", color=badge_color)
+
+            # Growth / Developmental headroom badge
+            if growth > 0:
+                dpg.set_value("player_badge_growth", f"[Growth: +{growth} -> POT {pot}]")
+                dpg.configure_item("player_badge_growth", color=(0, 255, 120))
+            elif growth < 0:
+                dpg.set_value("player_badge_growth", f"[Declining: {growth} -> POT {pot}]")
+                dpg.configure_item("player_badge_growth", color=(255, 140, 0))
+            else:
+                dpg.set_value("player_badge_growth", f"[Prime / Peak (POT {pot})]")
+                dpg.configure_item("player_badge_growth", color=(180, 180, 180))
+
+            # Update quick sign button label
+            if dpg.does_item_exist("btn_quick_sign_active_club"):
+                if self.selected_team and self.selected_team.get("teamid", 0) > 0:
+                    cur_team_name = self.selected_team.get("name", "Active Club")
+                    dpg.configure_item("btn_quick_sign_active_club", label=f"[+] Sign to {cur_team_name[:18]}")
+                else:
+                    dpg.configure_item("btn_quick_sign_active_club", label="[+] Sign to Active Club")
 
             jersey_num = self.session.get_player_jersey_number(pid)
             dpg.set_value("player_header_name", f"#{jersey_num} {p['name']} (ID: {pid})")
@@ -2631,6 +2764,24 @@ class SquadEditorApp:
         self._render_pitch_lineup(t["teamid"])
         self._refresh_dugout_display(t["teamid"])
         self._populate_team_tactics(t["teamid"])
+
+        # Update Squad Health Badge
+        self.active_team_audit = audit_team_squad(self.session, t["teamid"])
+        if dpg.does_item_exist("team_health_summary_group"):
+            dpg.configure_item("team_health_summary_group", show=True)
+            status = self.active_team_audit["status"]
+            issue_cnt = len(self.active_team_audit["issues"])
+            roster_cnt = self.active_team_audit["roster_count"]
+            gk_cnt = self.active_team_audit["gk_count"]
+            if status == "healthy":
+                dpg.set_value("team_health_badge", f"[Squad Health: Healthy ({roster_cnt} Players, {gk_cnt} GKs, No Conflicts)]")
+                dpg.configure_item("team_health_badge", color=(0, 255, 120))
+            elif status == "warning":
+                dpg.set_value("team_health_badge", f"[Squad Health: {issue_cnt} Warning(s) - Click to Inspect]")
+                dpg.configure_item("team_health_badge", color=(255, 200, 0))
+            else:
+                dpg.set_value("team_health_badge", f"[Squad Health: {issue_cnt} Critical Issue(s) - Click to Fix]")
+                dpg.configure_item("team_health_badge", color=(255, 80, 80))
 
         self.selected_team_roster_pid = None
         if dpg.does_item_exist("team_roster_player_actions"):
@@ -3884,6 +4035,284 @@ class SquadEditorApp:
         dpg.configure_item("record_save_feedback", color=(0, 255, 120))
         dpg.set_value("record_save_feedback", f"[OK] Record #{row_idx} staged ({self.session.change_tracker.count} changes)! Click 'Save File' above to persist.")
         self._render_db_records_page()
+
+    # --- Quick Search & Universal Jump Handlers ---
+
+    def _on_top_search_input(self, sender, app_data):
+        q = (dpg.get_value("top_global_search_input") or "").strip() if dpg.does_item_exist("top_global_search_input") else ""
+        self._open_quick_search_modal(initial_query=q)
+
+    def _on_open_quick_search_from_button(self):
+        q = (dpg.get_value("top_global_search_input") or "").strip() if dpg.does_item_exist("top_global_search_input") else ""
+        self._open_quick_search_modal(initial_query=q)
+
+    def _on_hotkey_search(self, sender, app_data):
+        if dpg.is_key_down(dpg.mvKey_Control):
+            q = (dpg.get_value("top_global_search_input") or "").strip() if dpg.does_item_exist("top_global_search_input") else ""
+            self._open_quick_search_modal(initial_query=q)
+
+    def _open_quick_search_modal(self, initial_query: str = ""):
+        dpg.configure_item("quick_search_modal", show=True)
+        if dpg.does_item_exist("quick_search_input"):
+            if initial_query:
+                dpg.set_value("quick_search_input", initial_query)
+            dpg.focus_item("quick_search_input")
+        self._on_quick_search_query_changed()
+
+    def _on_clear_quick_search(self):
+        if dpg.does_item_exist("quick_search_input"):
+            dpg.set_value("quick_search_input", "")
+        if dpg.does_item_exist("top_global_search_input"):
+            dpg.set_value("top_global_search_input", "")
+        self._on_quick_search_query_changed()
+
+    def _on_quick_search_query_changed(self):
+        if not dpg.does_item_exist("quick_search_input"):
+            return
+        query = dpg.get_value("quick_search_input") or ""
+        scope = dpg.get_value("quick_search_filter_type") if dpg.does_item_exist("quick_search_filter_type") else "All Results"
+
+        res = self.session.search_entities(query, max_players=25, max_teams=10)
+        matched_teams = res.get("teams", [])
+        matched_players = res.get("players", [])
+
+        items_labels = []
+        self.quick_search_items_data = []
+
+        # 1. Clubs
+        if scope in ("All Results", "Clubs Only"):
+            for t in matched_teams:
+                tid = t["teamid"]
+                tname = t["name"]
+                league = t.get("league", "")
+                roster_cnt = t.get("roster_count", len(t.get("roster", [])))
+                lbl = f"[CLUB]  {tname} (ID: {tid}) - {league} | {roster_cnt} Players"
+                items_labels.append(lbl)
+                self.quick_search_items_data.append({"type": "team", "data": t, "label": lbl})
+
+        # 2. Players
+        if scope in ("All Results", "Players Only"):
+            for p in matched_players:
+                pid = p["playerid"]
+                pname = p["name"]
+                ovr = p.get("overall", 60)
+                pot = p.get("potential", ovr)
+                pos = p.get("position", "SUB")
+                club = p.get("club", "Free Agent")
+                age = p.get("age", 25)
+                lbl = f"[PLAYER]  [{ovr}/{pot}] {pname} ({pos}) - {club} | Age: {age}"
+                items_labels.append(lbl)
+                self.quick_search_items_data.append({"type": "player", "data": p, "label": lbl})
+
+        if dpg.does_item_exist("quick_search_results_listbox"):
+            dpg.configure_item("quick_search_results_listbox", items=items_labels, num_items=min(14, max(5, len(items_labels))))
+        if dpg.does_item_exist("quick_search_count_label"):
+            dpg.set_value("quick_search_count_label", f"Matching Entities: {len(items_labels)} ({len(matched_teams)} Clubs, {len(matched_players)} Players)")
+
+    def _on_quick_search_select(self, sender, app_data):
+        pass
+
+    def _on_quick_search_confirm(self):
+        if not dpg.does_item_exist("quick_search_results_listbox"):
+            return
+        selected_lbl = dpg.get_value("quick_search_results_listbox")
+        if not selected_lbl or not self.quick_search_items_data:
+            return
+
+        selected_item = None
+        for it in self.quick_search_items_data:
+            if it["label"] == selected_lbl:
+                selected_item = it
+                break
+        if not selected_item:
+            selected_item = self.quick_search_items_data[0]
+
+        dpg.configure_item("quick_search_modal", show=False)
+
+        if selected_item["type"] == "team":
+            t = selected_item["data"]
+            self.selected_team = t
+            if dpg.does_item_exist("teams_listbox"):
+                for item in (dpg.get_item_configuration("teams_listbox").get("items") or []):
+                    if f"ID {t['teamid']}" in item:
+                        dpg.set_value("teams_listbox", item)
+                        break
+            self._populate_team_details(t)
+            if dpg.does_item_exist("main_tab_bar"):
+                dpg.set_value("main_tab_bar", "tab_teams")
+            dpg.set_value("status_text", f"Loaded Club: {t['name']}")
+
+        elif selected_item["type"] == "player":
+            p = selected_item["data"]
+            self.selected_player = p
+            if dpg.does_item_exist("players_listbox"):
+                for item in (dpg.get_item_configuration("players_listbox").get("items") or []):
+                    if f"ID: {p['playerid']}" in item or f"#{p['playerid']}" in item:
+                        dpg.set_value("players_listbox", item)
+                        break
+            self._populate_player_details(p)
+            if dpg.does_item_exist("main_tab_bar"):
+                dpg.set_value("main_tab_bar", "tab_players")
+            dpg.set_value("status_text", f"Inspecting Player: {p['name']}")
+
+    # --- Squad Health & Rule Auditor Handlers ---
+
+    def _on_open_team_health_modal(self):
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        audit = audit_team_squad(self.session, tid)
+        self.active_team_audit = audit
+
+        dpg.configure_item("team_health_modal", show=True)
+        dpg.set_value("audit_modal_team_header", f"Club: {audit['team_name']} (ID: {audit['team_id']})")
+
+        status_str = "[HEALTHY]" if audit["status"] == "healthy" else ("[WARNINGS DETECTED]" if audit["status"] == "warning" else "[CRITICAL ISSUES DETECTED]")
+        sum_txt = f"Status: {status_str}  |  Roster Size: {audit['roster_count']} Players  |  Goalkeepers: {audit['gk_count']}"
+        dpg.set_value("audit_modal_summary_text", sum_txt)
+
+        if dpg.does_item_exist("audit_modal_issues_container"):
+            dpg.delete_item("audit_modal_issues_container", children_only=True)
+            if not audit["issues"]:
+                dpg.add_text("[OK] All squad health checks passed! Squad is 100% compliant with FC 25 engine rules.", color=(0, 255, 120), parent="audit_modal_issues_container")
+            else:
+                for iss in audit["issues"]:
+                    color = (255, 80, 80) if iss["severity"] == "error" else ((255, 200, 0) if iss["severity"] == "warning" else (0, 255, 120))
+                    badge = "[CRITICAL ERROR]" if iss["severity"] == "error" else "[!]"
+                    with dpg.group(horizontal=True, parent="audit_modal_issues_container"):
+                        dpg.add_text(badge, color=color)
+                        dpg.add_text(iss["message"], wrap=600)
+
+        has_dup_jerseys = bool(audit.get("duplicate_jerseys"))
+        dpg.configure_item("btn_audit_fix_jerseys", show=has_dup_jerseys)
+        has_low_gks = audit.get("gk_count", 0) < 2
+        dpg.configure_item("btn_audit_sign_gk", show=has_low_gks)
+
+    def _on_audit_autofix_jerseys(self):
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        fixed = resolve_duplicate_jersey_numbers(self.session, tid)
+        if fixed > 0:
+            self._populate_team_details(self.selected_team)
+            self._update_save_and_changes_toolbar()
+            self._on_open_team_health_modal()
+            dpg.set_value("status_text", f"Successfully auto-renumbered {fixed} conflicting player jersey(s) for {self.selected_team['name']}.")
+
+    def _on_audit_sign_emergency_gk(self):
+        if not self.selected_team:
+            return
+        tid = self.selected_team["teamid"]
+        gk_pid = assign_emergency_goalkeeper(self.session, tid)
+        if gk_pid:
+            self._populate_team_details(self.selected_team)
+            self._update_save_and_changes_toolbar()
+            self._on_open_team_health_modal()
+            gk_name = self.session.players_lookup.get(gk_pid, {}).get("name", f"PID #{gk_pid}")
+            dpg.set_value("status_text", f"Signed Free Agent GK: {gk_name} to {self.selected_team['name']}!")
+        else:
+            dpg.set_value("status_text", "No free agent goalkeepers available in the database.")
+
+    def _on_run_full_database_audit(self):
+        flagged = audit_entire_database(self.session)
+        self.global_audit_results = flagged
+
+        dpg.configure_item("global_audit_modal", show=True)
+        total_teams = len(self.session.teams_cache)
+        err_count = sum(1 for a in flagged if a["status"] == "error")
+        warn_count = sum(1 for a in flagged if a["status"] == "warning")
+        healthy_count = total_teams - len(flagged)
+
+        sum_txt = f"Scanned {total_teams} Clubs: {healthy_count} Healthy, {err_count} Critical Issues, {warn_count} Warnings."
+        dpg.set_value("global_audit_summary_label", sum_txt)
+
+        if dpg.does_item_exist("global_audit_results_container"):
+            dpg.delete_item("global_audit_results_container", children_only=True)
+            if not flagged:
+                dpg.add_text("[OK] Perfect Database Health! All 816 squads satisfy FC 25 constraints.", color=(0, 255, 120), parent="global_audit_results_container")
+            else:
+                for audit in flagged:
+                    status_col = (255, 80, 80) if audit["status"] == "error" else ((255, 200, 0) if audit["status"] == "warning" else (0, 255, 120))
+                    badge_txt = "[ERROR]" if audit["status"] == "error" else "[WARNING]"
+                    issues_summary = "; ".join([iss["message"] for iss in audit["issues"][:2]])
+                    if len(audit["issues"]) > 2:
+                        issues_summary += f" (+{len(audit['issues'])-2} more)"
+
+                    with dpg.group(horizontal=True, parent="global_audit_results_container"):
+                        dpg.add_text(badge_txt, color=status_col)
+                        dpg.add_text(f"{audit['team_name'][:24]:<24} (ID: {audit['team_id']}) | Roster: {audit['roster_count']} | GKs: {audit['gk_count']} | {issues_summary}", wrap=670)
+                        dpg.add_spacer(width=10)
+                        dpg.add_button(label="Jump to Club", user_data=audit["team_id"], callback=self._on_jump_to_club_from_audit, width=105)
+                    dpg.add_separator(parent="global_audit_results_container")
+
+    def _on_jump_to_club_from_audit(self, sender, app_data, user_data):
+        tid = user_data
+        target_team = None
+        for t in self.session.teams_cache:
+            if t["teamid"] == tid:
+                target_team = t
+                break
+        if target_team:
+            dpg.configure_item("global_audit_modal", show=False)
+            self.selected_team = target_team
+            self._populate_team_details(target_team)
+            if dpg.does_item_exist("main_tab_bar"):
+                dpg.set_value("main_tab_bar", "tab_teams")
+            dpg.set_value("status_text", f"Jumped to Club: {target_team['name']}")
+
+    def _on_export_global_audit_csv(self):
+        if not self.global_audit_results:
+            flagged = audit_entire_database(self.session)
+            self.global_audit_results = flagged
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        default_name = f"FC25_Squad_Health_Audit_{len(self.global_audit_results)}_Clubs.csv"
+        target_path = filedialog.asksaveasfilename(
+            title="Export Squad Health Audit to CSV",
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV Spreadsheet", "*.csv"), ("All Files", "*.*")]
+        )
+        root.destroy()
+        if not target_path:
+            return
+
+        try:
+            with open(target_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Team ID", "Club Name", "Status", "Roster Count", "Goalkeeper Count", "Issues Count", "Issues Detail"])
+                for a in self.global_audit_results:
+                    issues_txt = " | ".join([iss["message"] for iss in a["issues"]])
+                    writer.writerow([a["team_id"], a["team_name"], a["status"], a["roster_count"], a["gk_count"], len(a["issues"]), issues_txt])
+            dpg.set_value("status_text", f"[OK] Exported Squad Health Audit ({len(self.global_audit_results)} clubs) to {target_path}")
+        except Exception as ex:
+            dpg.set_value("status_text", f"[ERR] Export failed: {ex}")
+
+    # --- 1-Click Recruitment & Scouting Action ---
+
+    def _on_quick_sign_to_active_club(self):
+        if not self.selected_player:
+            dpg.set_value("status_text", "No player selected in Inspector.")
+            return
+        if not self.selected_team or self.selected_team.get("teamid", 0) <= 0:
+            dpg.set_value("status_text", "Please select a target club in the Teams & Clubs tab first.")
+            return
+
+        pid = self.selected_player["playerid"]
+        tid = self.selected_team["teamid"]
+        pname = self.selected_player["name"]
+        tname = self.selected_team["name"]
+
+        ok = self.session.transfer_player(pid, tid, track=True)
+        if ok:
+            self.selected_player["teamid"] = tid
+            self.selected_player["club"] = tname
+            self._populate_player_details(self.selected_player)
+            self._update_save_and_changes_toolbar()
+            dpg.set_value("status_text", f"[OK] Successfully signed {pname} to {tname}! Stage saved in session.")
+        else:
+            dpg.set_value("status_text", f"[ERR] Failed to sign {pname} to {tname}.")
 
 def main():
     app = SquadEditorApp()
